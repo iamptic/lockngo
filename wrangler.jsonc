@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "webapp",
+  "name": "lockngo-platform",
   "compatibility_date": "2025-01-29",
   "compatibility_flags": ["nodejs_compat"],
   "pages_build_output_dir": "./dist",
