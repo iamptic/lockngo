@@ -278,6 +278,25 @@ app.delete('/api/admin/promos/:id', async (c) => {
     return c.json({ success: true });
 })
 
+app.post('/api/admin/cell/book', async (c) => {
+    const { cellId, phone } = await c.req.json();
+    // Create user if not exists
+    let user: any = await c.env.DB.prepare("SELECT * FROM users WHERE phone = ?").bind(phone).first();
+    if (!user) {
+        await c.env.DB.prepare("INSERT INTO users (phone, role) VALUES (?, 'user')").bind(phone).run();
+        user = await c.env.DB.prepare("SELECT * FROM users WHERE phone = ?").bind(phone).first();
+    }
+    // Create booking
+    const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
+    const accessCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    
+    await c.env.DB.prepare("UPDATE cells SET status = 'booked' WHERE id = ?").bind(cellId).run();
+    await c.env.DB.prepare("INSERT INTO bookings (user_id, cell_id, total_amount, status, access_code) VALUES (?, ?, 0, 'active', ?)").bind(user.id, cellId, accessCode).run();
+    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'admin_booking', 'Admin manual booking for ' || ? || ' cell ' || ?)").bind(cell.station_id, phone, cell.cell_number).run();
+
+    return c.json({ success: true });
+})
+
 app.post('/api/admin/cell/open', async (c) => {
     const { cellId } = await c.req.json();
     const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
@@ -376,6 +395,15 @@ const adminHtml = `<!DOCTYPE html>
         </div>
         <div class="grid grid-cols-2 gap-3 mb-3"><button @click="remoteOpen(selectedCell.id)" class="bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 flex items-center justify-center shadow-lg shadow-indigo-200"><i class="fas fa-lock-open mr-2"></i> Открыть</button><button @click="remoteClose(selectedCell.id)" class="bg-gray-800 text-white font-bold py-3 rounded-xl hover:bg-gray-900 flex items-center justify-center shadow-lg shadow-gray-200"><i class="fas fa-lock mr-2"></i> Закрыть</button></div>
         
+        <!-- Manual Booking for Free Cells -->
+        <div v-if="selectedCell.status === 'free'" class="mb-3 pt-3 border-t border-gray-100">
+            <div class="text-xs font-bold text-gray-400 uppercase mb-2">Ручное бронирование</div>
+            <div class="flex gap-2">
+                <input v-model="manualBookPhone" placeholder="+7999..." class="flex-1 p-2 border rounded-lg text-sm bg-gray-50">
+                <button @click="manualBooking(selectedCell.id)" class="bg-indigo-600 text-white px-4 rounded-lg font-bold text-xs hover:bg-indigo-700">OK</button>
+            </div>
+        </div>
+
         <!-- Force Release Button for Booked Cells -->
         <div v-if="selectedCell.status === 'booked'" class="mb-3">
             <div v-if="activeBooking" class="bg-indigo-50 p-3 rounded-lg mb-2 text-xs">
@@ -404,7 +432,7 @@ const adminHtml = `<!DOCTYPE html>
         </div>
     </div>
 </div>
-<script>const {createApp,ref,onMounted,watch,nextTick}=Vue;createApp({setup(){const auth=ref(false);const loginPass=ref('');const page=ref('dashboard');const stats=ref({});const stations=ref([]);const users=ref([]);const logs=ref([]);const promos=ref([]);const newPromo=ref({code:'', discount: ''});const activeStation=ref(null);const selectedCell=ref(null);const chartInstance=ref(null);const activeBooking=ref(null);const cellHistory=ref([]);const map=ref(null);const menu=[{id:'dashboard',label:'Главная',icon:'fas fa-home'},{id:'map',label:'Карта',icon:'fas fa-map'},{id:'devices',label:'Устройства',icon:'fas fa-server'},{id:'users',label:'Персонал',icon:'fas fa-users'},{id:'promos',label:'Промокоды',icon:'fas fa-tag'},{id:'logs',label:'Логи',icon:'fas fa-list-ul'}];
+<script>const {createApp,ref,onMounted,watch,nextTick}=Vue;createApp({setup(){const auth=ref(false);const loginPass=ref('');const page=ref('dashboard');const stats=ref({});const stations=ref([]);const users=ref([]);const logs=ref([]);const promos=ref([]);const newPromo=ref({code:'', discount: ''});const activeStation=ref(null);const selectedCell=ref(null);const chartInstance=ref(null);const activeBooking=ref(null);const cellHistory=ref([]);const map=ref(null);const manualBookPhone=ref('');const menu=[{id:'dashboard',label:'Главная',icon:'fas fa-home'},{id:'map',label:'Карта',icon:'fas fa-map'},{id:'devices',label:'Устройства',icon:'fas fa-server'},{id:'users',label:'Персонал',icon:'fas fa-users'},{id:'promos',label:'Промокоды',icon:'fas fa-tag'},{id:'logs',label:'Логи',icon:'fas fa-list-ul'}];
 const doLogin=()=>{if(loginPass.value==='12345'){auth.value=true;fetchData();}};
 const fetchData=async()=>{try{const [s,st,u,l,p]=await Promise.all([fetch('/api/admin/dashboard'),fetch('/api/admin/stations'),fetch('/api/admin/users'),fetch('/api/admin/logs'),fetch('/api/admin/promos')]);if(s.ok){stats.value=await s.json();if(page.value==='dashboard')nextTick(initChart);}if(st.ok){stations.value=await st.json();updateMap();}if(u.ok)users.value=await u.json();if(l.ok)logs.value=await l.json();if(p.ok)promos.value=await p.json();}catch(e){console.error('Fetch error',e)}};
 const setPage=(p)=>{page.value=p;if(p==='map'){nextTick(()=>initMap())}else if(p==='dashboard'){nextTick(()=>initChart())}else if(p==='logs' || p==='promos'){fetchData()}};
@@ -415,6 +443,7 @@ const selectCell=async(cell)=>{
     selectedCell.value=cell;
     cellHistory.value=[];
     activeBooking.value=null;
+    manualBookPhone.value='';
     const [hRes, bRes] = await Promise.all([
         fetch('/api/admin/cell/'+cell.id+'/history'),
         cell.status === 'booked' ? fetch('/api/admin/cell/'+cell.id+'/booking') : Promise.resolve({ok:false})
@@ -437,6 +466,15 @@ const forceRelease=async(id)=>{
     activeBooking.value = null;
     openStationDetail(activeStation.value.station.id);
 };
+const manualBooking=async(id)=>{
+    if(!manualBookPhone.value) return alert('Введите номер телефона');
+    if(!confirm('Создать ручное бронирование для '+manualBookPhone.value+'?')) return;
+    await fetch('/api/admin/cell/book',{method:'POST',body:JSON.stringify({cellId:id, phone:manualBookPhone.value})});
+    alert('Бронирование создано');
+    selectedCell.value.status = 'booked';
+    openStationDetail(activeStation.value.station.id);
+    selectCell(selectedCell.value); // Refresh to show booking details
+};
 const createPromo=async()=>{if(!newPromo.value.code || !newPromo.value.discount)return;await fetch('/api/admin/promos',{method:'POST',body:JSON.stringify(newPromo.value)});newPromo.value={code:'',discount:''};fetchData();alert('Промокод создан')};
 const deletePromo=async(id)=>{if(!confirm('Удалить?'))return;await fetch('/api/admin/promos/'+id,{method:'DELETE'});fetchData();};
 const remoteClose=async(id)=>{if(!confirm('Принудительно закрыть (сбросить флаг)?'))return;await fetch('/api/admin/cell/close',{method:'POST',body:JSON.stringify({cellId:id})});alert('Команда сброса отправлена');selectedCell.value=null;openStationDetail(activeStation.value.station.id);};const remoteOpen=async(id)=>{if(!confirm('Открыть ячейку удаленно? Это действие будет записано в лог.'))return;await fetch('/api/admin/cell/open',{method:'POST',body:JSON.stringify({cellId:id})});alert('Команда отправлена');selectedCell.value=null;openStationDetail(activeStation.value.station.id);};
@@ -444,7 +482,7 @@ const openAllCells=async(sid)=>{const code=prompt('ВВЕДИТЕ "CONFIRM" ЧТ
 const updateTariff=async(t)=>{await fetch('/api/admin/tariffs',{method:'POST',body:JSON.stringify({id:t.id,price:t.price_initial})});};
 const updateRole=async(u)=>{await fetch('/api/admin/users/role',{method:'POST',body:JSON.stringify({userId:u.id,role:u.role})});alert('Роль обновлена')};
 const updateScreen=async(s)=>{await fetch('/api/admin/station/'+s.id+'/screen',{method:'POST',body:JSON.stringify({content:s.screen_content,mode:s.screen_mode})});alert('Экран обновлен')};
-setInterval(()=>{if(auth.value && page.value==='dashboard')fetchData()},5000);return{auth,loginPass,doLogin,page,menu,stats,stations,users,logs,promos,newPromo,activeStation,selectedCell,activeBooking,cellHistory,setPage,openStationDetail,selectCell,remoteOpen,openAllCells,updateTariff,updateRole,updateScreen,changeStatus,forceRelease,createPromo,deletePromo}}}).mount('#app');</script></body></html>`
+setInterval(()=>{if(auth.value && page.value==='dashboard')fetchData()},5000);return{auth,loginPass,doLogin,page,menu,stats,stations,users,logs,promos,newPromo,activeStation,selectedCell,activeBooking,cellHistory,manualBookPhone,setPage,openStationDetail,selectCell,remoteOpen,openAllCells,updateTariff,updateRole,updateScreen,changeStatus,forceRelease,manualBooking,createPromo,deletePromo}}}).mount('#app');</script></body></html>`
 
 
 const userHtml = `<!DOCTYPE html>

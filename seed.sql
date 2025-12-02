@@ -97,6 +97,7 @@ INSERT INTO users (phone, role, name, ltv) VALUES ('+79990000002', 'support', 'T
 -- Seed Data
 INSERT INTO stations (name, address, lat, lng) VALUES ('ТЦ Галерея', 'Лиговский пр., 30А', 59.9275, 30.3600);
 INSERT INTO stations (name, address, lat, lng) VALUES ('Аэропорт Пулково', 'Пулковское ш., 41', 59.8003, 30.2625);
+INSERT INTO stations (name, address, lat, lng) VALUES ('Московский Вокзал', 'Невский пр., 85', 59.9296, 30.3620);
 
 -- STATION 1 CELLS (32 cells total)
 -- Row 1 (Small)
@@ -145,5 +146,16 @@ INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (1, 'M
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (1, 'L', 'Большая (лыжи)', 300);
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (2, 'M', 'Standard', 250);
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (2, 'L', 'Large', 450);
+INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (3, 'S', 'Small', 150);
+INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (3, 'M', 'Medium', 250);
+INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (3, 'L', 'Large', 350);
+
+-- STATION 3 CELLS
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A01', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A02', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A03', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A04', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A05', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A06', 'L');
 
 INSERT INTO promo_codes (code, discount_percent) VALUES ('WELCOME', 50);
