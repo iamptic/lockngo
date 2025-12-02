@@ -60,6 +60,9 @@ app.post('/api/book', async (c) => {
   await c.env.DB.prepare("UPDATE cells SET status = 'booked' WHERE id = ?").bind(cell.id).run()
   await c.env.DB.prepare("INSERT INTO bookings (user_id, cell_id, total_amount, status, access_code) VALUES (?, ?, ?, 'active', ?)").bind(user.id, cell.id, price, accessCode).run()
   await c.env.DB.prepare("UPDATE users SET ltv = ltv + ?, last_booking = CURRENT_TIMESTAMP WHERE id = ?").bind(price, user.id).run()
+  // Log the booking
+  await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'booking', 'User ' || ? || ' booked cell ' || ? || ' (ID: ' || ? || ')')").bind(stationId, phone, cell.cell_number, cell.id).run()
+  
   return c.json({ success: true, cellNumber: cell.cell_number, accessCode, validUntil: new Date(Date.now() + 24*60*60*1000).toISOString() })
 })
 
@@ -102,9 +105,20 @@ app.get('/api/admin/cell/:id/history', async (c) => {
     return c.json(results);
 })
 
+app.post('/api/admin/cell/open', async (c) => {
+    const { cellId } = await c.req.json();
+    const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
+    if(!cell) return c.json({error: 'Cell not found'}, 404);
+    
+    await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE id = ?").bind(cellId).run();
+    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'remote_open', 'Remote open cell ' || ? || ' (ID: ' || ? || ')')").bind(cell.station_id, cell.cell_number, cellId).run();
+    
+    return c.json({ success: true });
+})
+
 // --- FRONTEND HTML ---
 const adminHtml = `<!DOCTYPE html>
-<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Lock&Go Admin Pro</title><script src="https://unpkg.com/vue@3/dist/vue.global.js"></script><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><style>body { font-family: 'Inter', sans-serif; background: #F3F4F6; } [v-cloak] { display: none; } .sidebar-link.active { background: #4F46E5; color: white; } .sidebar-link:hover:not(.active) { background: #E5E7EB; } #map-admin { height: 600px; width: 100%; border-radius: 12px; } .cell-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 12px; } .cell-box { aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 12px; font-weight: bold; cursor: pointer; transition: all 0.2s; border: 2px solid transparent; } .cell-box:hover { transform: scale(1.05); z-index: 10; shadow: lg; } .cell-free { background: #DCFCE7; color: #166534; border-color: #BBF7D0; } .cell-booked { background: #FEE2E2; color: #991B1B; border-color: #FECACA; } .cell-maintenance { background: #F3F4F6; color: #6B7280; border-color: #E5E7EB; } .cell-selected { border-color: #4F46E5; ring: 2px; ring-color: #4F46E5; }</style></head><body><div id="app" v-cloak class="h-screen flex overflow-hidden">
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Lock&Go Admin Pro</title><script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.3.4/vue.global.min.js"></script><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><style>body { font-family: 'Inter', sans-serif; background: #F3F4F6; } [v-cloak] { display: none !important; } .sidebar-link.active { background: #4F46E5; color: white; } .sidebar-link:hover:not(.active) { background: #E5E7EB; } #map-admin { height: 600px; width: 100%; border-radius: 12px; } .cell-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 12px; } .cell-box { aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 12px; font-weight: bold; cursor: pointer; transition: all 0.2s; border: 2px solid transparent; } .cell-box:hover { transform: scale(1.05); z-index: 10; shadow: lg; } .cell-free { background: #DCFCE7; color: #166534; border-color: #BBF7D0; } .cell-booked { background: #FEE2E2; color: #991B1B; border-color: #FECACA; } .cell-maintenance { background: #F3F4F6; color: #6B7280; border-color: #E5E7EB; } .cell-selected { border-color: #4F46E5; ring: 2px; ring-color: #4F46E5; }</style></head><body><div id="app" v-cloak class="h-screen flex overflow-hidden">
 <!-- LOGIN -->
 <div v-if="!auth" class="fixed inset-0 bg-gray-900 flex items-center justify-center z-[100]"><div class="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md mx-4"><div class="flex justify-center mb-6 text-indigo-600 text-5xl"><i class="fas fa-cube"></i></div><h2 class="text-2xl font-bold text-center mb-6 text-gray-800">Lock&Go Admin</h2><input v-model="loginPass" type="password" placeholder="Password (12345)" class="w-full p-4 border border-gray-300 rounded-xl mb-4 focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none text-lg" @keyup.enter="doLogin"><button @click="doLogin" class="w-full bg-indigo-600 text-white font-bold py-4 rounded-xl hover:bg-indigo-700 transition text-lg shadow-lg shadow-indigo-200">Войти в систему</button></div></div>
 <!-- SIDEBAR -->
@@ -133,8 +147,8 @@ const adminHtml = `<!DOCTYPE html>
 <div v-if="page === 'users'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Персонал и Клиенты</h1><div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"><table class="w-full text-sm text-left"><thead class="text-xs text-gray-400 uppercase bg-gray-50 border-b"><tr><th class="px-6 py-4">Телефон</th><th class="px-6 py-4">Имя</th><th class="px-6 py-4">Роль</th><th class="px-6 py-4">LTV</th></tr></thead><tbody><tr v-for="u in users" :key="u.id" class="border-b"><td class="px-6 py-4 font-bold">{{u.phone}}</td><td class="px-6 py-4">{{u.name||'-'}}</td><td class="px-6 py-4"><select v-model="u.role" @change="updateRole(u)" class="p-1 bg-gray-50 border rounded text-xs font-bold uppercase" :class="{'text-indigo-600': u.role==='admin', 'text-green-600': u.role==='support'}"><option value="user">User</option><option value="support">Support</option><option value="admin">Admin</option></select></td><td class="px-6 py-4">{{u.ltv}} ₽</td></tr></tbody></table></div></div>
 </div></main></div>
 <!-- CELL MODAL -->
-<div v-if="selectedCell && selectedCell.id" class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center" @click.self="selectedCell=null">
-    <div class="bg-white rounded-2xl p-6 w-96 shadow-2xl">
+<div id="cell-modal" style="display: none;" :style="{ display: selectedCell ? 'flex' : 'none' }" class="fixed inset-0 bg-black/50 z-[60] items-center justify-center" @click.self="selectedCell=null">
+    <div class="bg-white rounded-2xl p-6 w-96 shadow-2xl" v-if="selectedCell">
         <div class="flex justify-between items-center mb-6"><h3 class="text-xl font-bold">Ячейка {{ selectedCell.cell_number }}</h3><button @click="selectedCell=null" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button></div>
         <div class="grid grid-cols-2 gap-4 mb-6">
             <div class="bg-gray-50 p-3 rounded-lg"><div class="text-xs text-gray-500 uppercase">Размер</div><div class="font-bold text-lg">{{ selectedCell.size }}</div></div>
