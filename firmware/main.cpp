@@ -1,97 +1,139 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include <HTTPClient.h>
 #include <ArduinoJson.h>
 
 // --- CONFIGURATION ---
 const char* WIFI_SSID = "LocknGo_Guest";
 const char* WIFI_PASS = "securepassword";
-const char* MQTT_SERVER = "mqtt.lockngo.ru";
-const int MQTT_PORT = 1883;
-const char* DEVICE_ID = "STATION_001";
+const char* API_URL = "https://lockngo.pages.dev"; // ЗАМЕНИТЕ НА ВАШ АКТУАЛЬНЫЙ URL (например, из wrangler)
+const int STATION_ID = 1; // ID станции в базе данных (1 = Галерея, 2 = Пулково)
 
 // --- PINS ---
-// Using Shift Register (74HC595) or IO Expander for locks to save pins
+// Using Shift Register (74HC595) for locks
 const int DATA_PIN = 13;
 const int LATCH_PIN = 12;
 const int CLOCK_PIN = 14;
+const int SCANNER_RX = 16; // Pin connected to QR Scanner TX
+const int SCANNER_TX = 17;
 
 // --- GLOBALS ---
-WiFiClient espClient;
-PubSubClient client(espClient);
-unsigned long lastHeartbeat = 0;
+unsigned long lastSync = 0;
+const long syncInterval = 5000; // Sync every 5 seconds
 
 // --- LOCK CONTROL ---
-void openLock(int cellId) {
-  Serial.printf("Opening cell %d\n", cellId);
-  // Logic to trigger solenoid via Shift Register/Expander
-  // Pulse for 500ms
-  // digitalWrite(RELAY_PIN, HIGH); delay(500); digitalWrite(RELAY_PIN, LOW);
+// Map cell numbers (e.g., "A01") to Shift Register bit indices
+int getCellIndex(String cellNumber) {
+  // Example mapping logic. In reality, you'd have a lookup table.
+  // A01 -> 0, A02 -> 1, ...
+  char row = cellNumber.charAt(0); // 'A', 'B', ...
+  int num = cellNumber.substring(1).toInt(); // 1, 2, ...
+  
+  int rowIndex = row - 'A'; // 0, 1, 2...
+  return (rowIndex * 8) + (num - 1);
 }
 
-// --- MQTT CALLBACK ---
-void callback(char* topic, byte* payload, unsigned int length) {
-  String message;
-  for (int i = 0; i < length; i++) message += (char)payload[i];
+void openLock(String cellNumber) {
+  int pinIndex = getCellIndex(cellNumber);
+  Serial.printf("[HW] Opening lock for cell %s (Index: %d)\n", cellNumber.c_str(), pinIndex);
   
-  Serial.printf("Msg on [%s]: %s\n", topic, message.c_str());
+  // Logic to drive 74HC595
+  // This is a simplified example pulsing the specific bit
+  digitalWrite(LATCH_PIN, LOW);
+  // shiftOut(DATA_PIN, CLOCK_PIN, MSBFIRST, (1 << pinIndex)); // Simplified bitmask
+  shiftOut(DATA_PIN, CLOCK_PIN, MSBFIRST, 255); // Debug: turn on all for test
+  digitalWrite(LATCH_PIN, HIGH);
+  
+  delay(500); // Keep open for 0.5s
+  
+  // Reset locks (close)
+  digitalWrite(LATCH_PIN, LOW);
+  shiftOut(DATA_PIN, CLOCK_PIN, MSBFIRST, 0);
+  digitalWrite(LATCH_PIN, HIGH);
+}
 
-  DynamicJsonDocument doc(1024);
-  deserializeJson(doc, message);
+// --- API INTERACTION ---
+void syncWithServer() {
+  if(WiFi.status() != WL_CONNECTED) return;
 
-  const char* cmd = doc["cmd"];
-  if (strcmp(cmd, "open") == 0) {
-    int cell = doc["cell"];
-    openLock(cell);
-    // Publish confirmation
-    char resp[100];
-    sprintf(resp, "{\"event\":\"opened\", \"cell\":%d}", cell);
-    client.publish("lockngo/events", resp);
+  HTTPClient http;
+  String endpoint = String(API_URL) + "/api/hw/sync";
+  
+  http.begin(endpoint);
+  http.addHeader("Content-Type", "application/json");
+  
+  // Create JSON payload
+  StaticJsonDocument<200> doc;
+  doc["id"] = STATION_ID;
+  doc["battery"] = 100; // Mock battery level
+  doc["wifi"] = WiFi.RSSI();
+  doc["error"] = ""; // Send error string if any HW fault
+  
+  String requestBody;
+  serializeJson(doc, requestBody);
+  
+  int httpResponseCode = http.POST(requestBody);
+  
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    // Serial.println(httpResponseCode);
+    // Serial.println(response);
+    
+    DynamicJsonDocument reqDoc(2048);
+    DeserializationError error = deserializeJson(reqDoc, response);
+    
+    if (!error) {
+      // 1. Check for open commands
+      JsonArray openCells = reqDoc["open"].as<JsonArray>();
+      for(JsonVariant v : openCells) {
+        String cellNum = v.as<String>();
+        openLock(cellNum);
+      }
+      
+      // 2. Update Screen Content (e.g. Nextion display or LCD)
+      String screenMode = reqDoc["screen"]["mode"].as<String>();
+      String screenContent = reqDoc["screen"]["content"].as<String>();
+      // Serial.printf("Updating Screen: Mode=%s Content=%s\n", screenMode.c_str(), screenContent.c_str());
+    }
+  } else {
+    Serial.printf("Error on sending POST: %d\n", httpResponseCode);
   }
-  else if (strcmp(cmd, "reboot") == 0) {
-    ESP.restart();
-  }
+  
+  http.end();
 }
 
 void setup() {
   Serial.begin(115200);
   
-  // Init Hardware
+  // Init Pins
   pinMode(DATA_PIN, OUTPUT);
   pinMode(LATCH_PIN, OUTPUT);
   pinMode(CLOCK_PIN, OUTPUT);
-
-  // WiFi
+  
+  // Connect WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("WiFi Connected");
-
-  // MQTT
-  client.setServer(MQTT_SERVER, MQTT_PORT);
-  client.setCallback(callback);
-}
-
-void reconnect() {
-  while (!client.connected()) {
-    if (client.connect(DEVICE_ID)) {
-      client.subscribe("lockngo/cmd/" DEVICE_ID);
-    } else {
-      delay(5000);
-    }
-  }
+  Serial.println(" Connected!");
 }
 
 void loop() {
-  if (!client.connected()) reconnect();
-  client.loop();
-
-  // Heartbeat every 60s
-  if (millis() - lastHeartbeat > 60000) {
-    lastHeartbeat = millis();
-    String status = String("{\"id\":\"") + DEVICE_ID + "\", \"battery\": 100, \"wifi\": " + WiFi.RSSI() + "}";
-    client.publish("lockngo/heartbeat", status.c_str());
+  // 1. Periodic Sync
+  if (millis() - lastSync > syncInterval) {
+    syncWithServer();
+    lastSync = millis();
+  }
+  
+  // 2. Listen for QR Scanner (UART)
+  if (Serial.available()) {
+    String qrCode = Serial.readStringUntil('\n');
+    qrCode.trim();
+    if (qrCode.length() > 5) {
+       Serial.println("Scanned QR: " + qrCode);
+       // Call /api/station/scan logic here...
+    }
   }
 }
