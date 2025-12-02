@@ -218,6 +218,27 @@ app.get('/api/admin/cell/:id/history', async (c) => {
     return c.json(results);
 })
 
+// API: Get user active bookings
+app.get('/api/user/bookings', async (c) => {
+    const phone = c.req.query('phone');
+    if(!phone) return c.json([]);
+    
+    const { results } = await c.env.DB.prepare(`
+        SELECT b.*, c.cell_number, c.size, s.name as station_name, s.address 
+        FROM bookings b 
+        JOIN cells c ON b.cell_id = c.id 
+        JOIN stations s ON c.station_id = s.id 
+        JOIN users u ON b.user_id = u.id
+        WHERE u.phone = ? AND b.status = 'active'
+        ORDER BY b.created_at DESC
+    `).bind(phone).all();
+    
+    return c.json(results.map((r: any) => ({
+        ...r,
+        validUntil: new Date(new Date(r.created_at).getTime() + 24*60*60*1000).toISOString() // Assuming 24h rental
+    })));
+})
+
 app.post('/api/admin/cell/open', async (c) => {
     const { cellId } = await c.req.json();
     const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
@@ -382,13 +403,19 @@ const userHtml = `<!DOCTYPE html>
     </div>
 
     <script>
-        const state={view:'home',data:{},activePromo:null,userPhone:'',stations:[]};
+        const state={view:'home',data:{},activePromo:null,userPhone:'',stations:[], bookings: []};
         
         const HomeView=()=>\`
             <div class="flex flex-col h-full">
                 <div class="bg-white px-6 py-4 border-b flex justify-between items-center sticky top-0 z-10">
                     <div class="flex items-center gap-2 text-indigo-700 font-black text-xl tracking-tighter"><i class="fas fa-cube"></i> Lock&Go</div>
-                    <button onclick="window.location.href='/admin'" class="text-gray-300 hover:text-indigo-600"><i class="fas fa-cog"></i></button>
+                    <div class="flex gap-3">
+                         <button onclick="navigate('my_rentals')" class="relative text-gray-500 hover:text-indigo-600 transition">
+                            <i class="fas fa-key text-xl"></i>
+                            \${state.bookings.length > 0 ? \`<span class="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-[10px] text-white flex items-center justify-center font-bold">\${state.bookings.length}</span>\` : ''}
+                         </button>
+                         <button onclick="window.location.href='/admin'" class="text-gray-300 hover:text-indigo-600"><i class="fas fa-cog"></i></button>
+                    </div>
                 </div>
                 <div class="p-4 flex-1 flex flex-col overflow-hidden">
                     <div class="brand-gradient rounded-2xl p-6 text-white shadow-lg cursor-pointer mb-4 shrink-0" onclick="alert('Сканирование QR...')">
@@ -407,6 +434,53 @@ const userHtml = `<!DOCTYPE html>
                 </div>
             </div>\`;
 
+        const MyRentalsView=()=>\`
+             <div class="flex flex-col h-full bg-gray-50">
+                <div class="px-6 py-4 bg-white border-b flex justify-between items-center sticky top-0 z-10">
+                    <h1 class="font-bold text-xl">Мои аренды</h1>
+                    <button onclick="navigate('home')" class="text-indigo-600 font-bold text-sm"><i class="fas fa-plus"></i> Еще</button>
+                </div>
+                <div class="flex-1 overflow-y-auto p-4 space-y-6">
+                    \${state.bookings.length === 0 ? 
+                        \`<div class="text-center text-gray-400 mt-20"><i class="fas fa-box-open text-6xl mb-4 opacity-30"></i><p>У вас нет активных аренд</p><button onclick="navigate('home')" class="mt-4 text-indigo-600 font-bold">Найти ячейку</button></div>\` 
+                        : state.bookings.map((b, idx) => \`
+                        <div class="bg-white rounded-2xl shadow-lg overflow-hidden relative">
+                             <div class="absolute top-0 left-0 w-full h-1 bg-green-500"></div>
+                             <div class="p-5">
+                                <div class="flex justify-between items-start mb-4">
+                                    <div>
+                                        <h3 class="font-bold text-lg text-gray-900">\${b.station_name}</h3>
+                                        <p class="text-xs text-gray-500">\${b.address}</p>
+                                    </div>
+                                    <div class="bg-indigo-50 text-indigo-700 px-3 py-1 rounded-lg font-black text-xl">\${b.cell_number}</div>
+                                </div>
+                                
+                                <div class="flex justify-center py-4 bg-gray-50 rounded-xl mb-4 border border-gray-100 relative group">
+                                     <div id="qr-\${b.id}" class="p-2 bg-white rounded-lg shadow-sm"></div>
+                                     <div class="absolute bottom-1 text-[10px] text-gray-400 uppercase font-bold">Код доступа</div>
+                                </div>
+
+                                <div class="flex gap-3">
+                                    <button onclick="userRemoteOpen('\${b.accessCode}')" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-xl font-bold shadow-md shadow-indigo-200 active:scale-[0.98] transition flex items-center justify-center gap-2">
+                                        <i class="fas fa-unlock"></i> Открыть
+                                    </button>
+                                </div>
+                                <div class="mt-3 text-center">
+                                     <p class="text-[10px] text-gray-400 uppercase font-bold">Действует до: \${new Date(b.validUntil).toLocaleString()}</p>
+                                     <p class="text-[10px] text-green-600 font-bold">Вы можете открывать ячейку многократно</p>
+                                </div>
+                             </div>
+                        </div>
+                    \`).join('')}
+                </div>
+                 <div class="p-4 bg-white border-t">
+                    <button onclick="navigate('home')" class="w-full py-3 bg-gray-100 hover:bg-gray-200 rounded-xl font-bold text-gray-700">Вернуться на главную</button>
+                </div>
+             </div>
+        \`;
+
+        // Old SuccessView removed, replaced by MyRentalsView logic
+
         const BookingView=(station)=>\`
             <div class="flex flex-col h-full bg-white">
                 <div class="px-4 py-4 border-b flex items-center sticky top-0 bg-white z-10">
@@ -424,69 +498,45 @@ const userHtml = `<!DOCTYPE html>
                 </div>
             </div>\`;
 
-        const SuccessView=(data)=>\`
-            <div class="flex flex-col h-full brand-gradient text-white p-6 items-center justify-center text-center overflow-y-auto">
-                <div class="w-16 h-16 bg-white/20 backdrop-blur rounded-full flex items-center justify-center text-2xl mb-4 animate-bounce"><i class="fas fa-unlock-alt"></i></div>
-                <h1 class="text-2xl font-bold mb-2">Оплачено!</h1>
-                
-                <!-- QR CODE CARD -->
-                <div class="bg-white text-gray-900 rounded-2xl p-6 w-full max-w-sm shadow-2xl mb-6 relative overflow-hidden">
-                    <div class="absolute top-0 left-0 w-full h-2 bg-indigo-500"></div>
-                    <div class="text-xs uppercase font-bold text-gray-400 mb-4 tracking-wider">Ваш ключ доступа</div>
-                    
-                    <!-- JS GENERATED QR -->
-                    <div class="flex justify-center mb-6 relative">
-                        <div id="qrcode" class="p-2 border-4 border-gray-100 rounded-xl"></div>
-                        <div class="absolute inset-0 flex items-center justify-center pointer-events-none opacity-10">
-                             <i class="fas fa-cube text-6xl text-indigo-900"></i>
-                        </div>
-                    </div>
-                    
-                    <div class="flex justify-between items-end border-t border-gray-100 pt-4">
-                        <div class="text-left">
-                            <div class="text-gray-400 text-[10px] uppercase font-bold">Номер ячейки</div>
-                            <div class="text-5xl font-black text-indigo-600 leading-none">\${data.cellNumber}</div>
-                        </div>
-                        <div class="text-right">
-                            <div class="text-gray-400 text-[10px] uppercase font-bold">Действует до</div>
-                            <div class="text-lg font-bold text-gray-700 leading-none">\${new Date(data.validUntil).toLocaleTimeString().slice(0,5)}</div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- REMOTE OPEN BUTTON -->
-                <div class="w-full max-w-sm space-y-3">
-                    <button onclick="userRemoteOpen('\${data.accessCode}')" class="w-full bg-white text-indigo-600 font-bold py-4 rounded-xl shadow-lg hover:bg-indigo-50 active:scale-95 transition flex items-center justify-center gap-2">
-                        <i class="fas fa-wifi"></i> Открыть удаленно
-                    </button>
-                    <button onclick="navigate('home')" class="w-full py-3 text-white/60 hover:text-white font-bold text-sm">
-                        Вернуться на главную
-                    </button>
-                </div>
-            </div>\`;
 
         let mapInstance = null;
 
         async function navigate(view,params=null){
             state.view=view;
             const app=document.getElementById('app');
+            
+            // Always refresh bookings count
+            if(state.userPhone) await fetchUserBookings();
+
             if(view==='home'){ app.innerHTML=HomeView(); loadStations(); }
             else if(view==='booking'){ app.innerHTML=BookingView(params); loadTariffs(params.id); if(!state.userPhone) setTimeout(openAuth, 500); }
-            else if(view==='success'){ 
-                app.innerHTML=SuccessView(params); 
+            else if(view==='my_rentals'){ 
+                app.innerHTML=MyRentalsView();
                 setTimeout(() => {
-                    // Generate QR locally
-                    document.getElementById('qrcode').innerHTML = '';
-                    new QRCode(document.getElementById("qrcode"), {
-                        text: params.accessCode,
-                        width: 150,
-                        height: 150,
-                        colorDark : "#4F46E5",
-                        colorLight : "#ffffff",
-                        correctLevel : QRCode.CorrectLevel.H
+                    state.bookings.forEach(b => {
+                        const el = document.getElementById('qr-'+b.id);
+                        if(el) {
+                            el.innerHTML = '';
+                            new QRCode(el, {
+                                text: b.accessCode,
+                                width: 128,
+                                height: 128,
+                                colorDark : "#000000",
+                                colorLight : "#ffffff",
+                                correctLevel : QRCode.CorrectLevel.H
+                            });
+                        }
                     });
                 }, 100);
             }
+        }
+
+        async function fetchUserBookings(){
+            if(!state.userPhone) return;
+            try {
+                const res = await fetch('/api/user/bookings?phone='+encodeURIComponent(state.userPhone));
+                if(res.ok) state.bookings = await res.json();
+            } catch(e) { console.error(e); }
         }
 
         async function userRemoteOpen(code) {
@@ -593,7 +643,7 @@ const userHtml = `<!DOCTYPE html>
 
         function openAuth() { document.getElementById('auth-modal').classList.remove('hidden'); document.getElementById('auth-modal').classList.add('flex'); setTimeout(() => document.getElementById('auth-panel').classList.remove('translate-y-full'), 10); }
         function closeAuth() { document.getElementById('auth-panel').classList.add('translate-y-full'); setTimeout(() => { document.getElementById('auth-modal').classList.add('hidden'); document.getElementById('auth-modal').classList.remove('flex'); }, 300); }
-        function loginWith(provider) { state.userPhone = '+7 (999) 000-00-01'; closeAuth(); if(state.view === 'booking') navigate('booking', state.activeStationData.station); }
+        function loginWith(provider) { state.userPhone = '+7 (999) 000-00-01'; closeAuth(); fetchUserBookings(); if(state.view === 'booking') navigate('booking', state.activeStationData.station); }
         function toggleRules(show) { const m = document.getElementById('rules-modal'); if(show) { m.classList.remove('hidden'); m.classList.add('flex'); } else { m.classList.add('hidden'); m.classList.remove('flex'); } }
         async function processBooking(stationId){
             if(!state.userPhone){ openAuth(); return; }
@@ -601,7 +651,10 @@ const userHtml = `<!DOCTYPE html>
             if(!sizeInput) return alert('Пожалуйста, выберите размер ячейки');
             const res=await fetch('/api/book',{method:'POST',body:JSON.stringify({stationId,size:sizeInput.value,phone:state.userPhone})});
             const result=await res.json();
-            if(result.success) navigate('success',result);
+            if(result.success) {
+                await fetchUserBookings();
+                navigate('my_rentals');
+            }
             else alert(result.error);
         }
 
