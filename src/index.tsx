@@ -1,93 +1,44 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 
-type Bindings = {
-  DB: D1Database
-  ASSETS: Fetcher
-}
-
+type Bindings = { DB: D1Database; ASSETS: Fetcher }
 const app = new Hono<{ Bindings: Bindings }>()
-
 app.use('/*', cors())
 
-// API Routes
 const api = new Hono<{ Bindings: Bindings }>()
 
-// 1. Получить локации (с типом)
 api.get('/locations', async (c) => {
-  try {
-    const { results } = await c.env.DB.prepare('SELECT * FROM stations').all()
-    return c.json(results)
-  } catch (e) {
-    return c.json({ error: e.message }, 500)
-  }
+  try { return c.json((await c.env.DB.prepare('SELECT * FROM stations').all()).results) } 
+  catch (e) { return c.json({ error: e.message }, 500) }
 })
 
-// 2. Детали локации + РЕАЛЬНЫЕ ТАРИФЫ
 api.get('/location/:id', async (c) => {
   const id = c.req.param('id')
   const station = await c.env.DB.prepare('SELECT * FROM stations WHERE id = ?').bind(id).first()
-  
   if(!station) return c.json({error: 'Not found'}, 404)
-
-  // Получаем тарифы для этой станции
-  const { results: tariffs } = await c.env.DB.prepare('SELECT * FROM tariffs WHERE station_id = ?').bind(id).all()
-
-  // Получаем доступность
-  const { results: availability } = await c.env.DB.prepare(`
-    SELECT size, count(*) as total, 
-    sum(case when status = 'free' then 1 else 0 end) as free 
-    FROM cells WHERE station_id = ? GROUP BY size
-  `).bind(id).all()
-
+  const tariffs = (await c.env.DB.prepare('SELECT * FROM tariffs WHERE station_id = ?').bind(id).all()).results
+  const availability = (await c.env.DB.prepare(`SELECT size, count(*) as total, sum(case when status = 'free' then 1 else 0 end) as free FROM cells WHERE station_id = ? GROUP BY size`).bind(id).all()).results
   return c.json({ station, tariffs, availability })
 })
 
-// 3. Бронирование (С учетом тарифов)
 api.post('/book', async (c) => {
   const { station_id, size } = await c.req.json()
-  
-  // 1. Ищем свободную ячейку
-  const cell = await c.env.DB.prepare(`
-    SELECT id, cell_number FROM cells 
-    WHERE station_id = ? AND size = ? AND status = 'free' 
-    LIMIT 1
-  `).bind(station_id, size).first()
-
+  const cell = await c.env.DB.prepare(`SELECT id, cell_number FROM cells WHERE station_id = ? AND size = ? AND status = 'free' LIMIT 1`).bind(station_id, size).first()
   if (!cell) return c.json({ success: false, message: 'Нет ячеек' }, 400)
-
-  // 2. Узнаем цену (для логов)
-  const tariff = await c.env.DB.prepare(`
-    SELECT * FROM tariffs WHERE station_id = ? AND size = ?
-  `).bind(station_id, size).first()
-
+  const tariff = await c.env.DB.prepare(`SELECT * FROM tariffs WHERE station_id = ? AND size = ?`).bind(station_id, size).first()
   const price = tariff ? tariff.price_initial : 0
   const currency = tariff ? tariff.currency : 'RUB'
-
-  // 3. Бронируем
   await c.env.DB.prepare("UPDATE cells SET status = 'booked' WHERE id = ?").bind(cell.id).run()
-  
-  // 4. Пишем лог транзакции
-  await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, ?, ?)")
-    .bind(station_id, 'booking', `Booked Cell #${cell.cell_number} (${size}). Price: ${price} ${currency}`)
-    .run()
-
-  return c.json({ 
-    success: true, 
-    booking: { 
-      id: Date.now(), 
-      cell_number: cell.cell_number, 
-      code: Math.floor(1000 + Math.random() * 9000), // 4-digit PIN
-      price_info: `${price} ${currency}`
-    } 
-  })
+  await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, ?, ?)").bind(station_id, 'booking', `Booked Cell #${cell.cell_number} (${size}). Price: ${price} ${currency}`).run()
+  return c.json({ success: true, booking: { id: Date.now(), cell_number: cell.cell_number, code: Math.floor(1000 + Math.random() * 9000), price_info: `${price} ${currency}` } })
 })
 
-// Mount API
+api.post('/hardware/sync', async (c) => c.json({ command: 'ok', timestamp: Date.now() }))
+
 app.route('/api', api)
 
-app.get('/*', async (c) => {
-  return c.env.ASSETS.fetch(new URL('/index.html', c.req.url))
-})
+const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>Lock&Go - Свободные руки</title><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><style>@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');body{font-family:'Inter',sans-serif;background-color:#F3F4F6}.brand-blue{background-color:#0047FF}.hide-scrollbar::-webkit-scrollbar{display:none}.hide-scrollbar{-ms-overflow-style:none;scrollbar-width:none}</style></head><body class="h-screen flex flex-col overflow-hidden bg-gray-50"><div id="app" class="flex-1 flex flex-col overflow-y-auto pb-20 hide-scrollbar relative"><header class="bg-white px-6 py-4 shadow-sm sticky top-0 z-10 flex justify-between items-center"><div class="flex items-center gap-2"><div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold"><i class="fas fa-cube"></i></div><h1 class="text-xl font-bold tracking-tight text-gray-900">Lock<span class="text-blue-600">&</span>Go</h1></div><button class="text-gray-400 hover:text-gray-900"><i class="fas fa-user-circle text-2xl"></i></button></header><div id="view-home" class="flex-1 flex flex-col"><div class="mx-4 mt-4 p-6 bg-gradient-to-r from-gray-900 to-blue-900 rounded-2xl text-white shadow-lg relative overflow-hidden"><div class="relative z-10"><h2 class="text-xl font-bold mb-1">Свободные руки —</h2><h3 class="text-lg font-light opacity-90 mb-4">успешные сделки</h3><button class="bg-white text-blue-900 px-4 py-2 rounded-full text-sm font-bold shadow-md active:scale-95 transition">Найти локер рядом</button></div><i class="fas fa-shopping-bag absolute -bottom-4 -right-4 text-8xl opacity-10 transform rotate-12"></i></div><div class="flex gap-3 overflow-x-auto px-4 py-6 hide-scrollbar"><button class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-full text-sm whitespace-nowrap shadow-md"><i class="fas fa-map-marker-alt"></i> Все</button><button class="flex items-center gap-2 px-4 py-2 bg-white text-gray-600 border border-gray-200 rounded-full text-sm whitespace-nowrap"><i class="fas fa-shopping-cart"></i> ТЦ</button><button class="flex items-center gap-2 px-4 py-2 bg-white text-gray-600 border border-gray-200 rounded-full text-sm whitespace-nowrap"><i class="fas fa-theater-masks"></i> Театры</button><button class="flex items-center gap-2 px-4 py-2 bg-white text-gray-600 border border-gray-200 rounded-full text-sm whitespace-nowrap"><i class="fas fa-briefcase"></i> MICE</button></div><div class="px-4 pb-4 space-y-4" id="locations-list"><div class="animate-pulse space-y-4"><div class="h-32 bg-gray-200 rounded-xl"></div><div class="h-32 bg-gray-200 rounded-xl"></div></div></div></div><div id="view-booking" class="hidden fixed inset-0 bg-white z-50 flex flex-col"><div class="p-4 border-b flex items-center gap-4"><button onclick="goHome()" class="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center hover:bg-gray-200"><i class="fas fa-arrow-left"></i></button><h2 class="font-bold text-lg" id="booking-station-name">Название локации</h2></div><div class="flex-1 overflow-y-auto p-6"><img src="https://images.unsplash.com/photo-1567401893414-76b7b1e5a7a5?ixlib=rb-1.2.1&auto=format&fit=crop&w=800&q=80" class="w-full h-48 object-cover rounded-xl mb-6 shadow-md" alt="Locker"><h3 class="text-lg font-bold mb-4">Выберите размер ячейки</h3><div class="space-y-3" id="cells-selection"></div></div><div class="p-6 border-t bg-gray-50"><button onclick="processBooking()" id="btn-book" class="w-full bg-blue-600 text-white py-4 rounded-xl font-bold text-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed">Забронировать</button></div></div><div id="view-success" class="hidden fixed inset-0 bg-blue-600 text-white z-50 flex flex-col items-center justify-center p-8 text-center"><div class="w-24 h-24 bg-white rounded-full flex items-center justify-center mb-6 shadow-xl animate-bounce"><i class="fas fa-check text-4xl text-blue-600"></i></div><h2 class="text-3xl font-bold mb-2">Успешно!</h2><p class="text-blue-100 mb-8">Ячейка забронирована. У вас есть 15 минут, чтобы положить вещи.</p><div class="bg-white/10 backdrop-blur-md rounded-xl p-6 w-full max-w-sm mb-8 border border-white/20"><div class="text-sm opacity-70 mb-1">Ячейка №</div><div class="text-5xl font-mono font-bold mb-4" id="success-cell-num">--</div><div class="text-sm opacity-70 mb-1">Код доступа</div><div class="text-2xl font-mono font-bold tracking-widest" id="success-code">----</div><div class="text-xs opacity-70 mt-4 pt-4 border-t border-white/20" id="success-price"></div></div><button onclick="goHome()" class="bg-white text-blue-600 px-8 py-3 rounded-full font-bold shadow-lg hover:bg-blue-50 transition">На главную</button></div></div><nav class="fixed bottom-0 w-full bg-white border-t border-gray-200 flex justify-around py-3 pb-safe z-40"><button class="bottom-nav-item active flex flex-col items-center gap-1 text-xs font-medium px-4" onclick="goHome()"><i class="fas fa-map-marked-alt text-xl"></i><span>Карта</span></button><button class="bottom-nav-item text-gray-400 flex flex-col items-center gap-1 text-xs font-medium px-4"><i class="fas fa-ticket-alt text-xl"></i><span>Аренды</span></button><button class="bottom-nav-item text-gray-400 flex flex-col items-center gap-1 text-xs font-medium px-4"><i class="fas fa-wallet text-xl"></i><span>Кошелек</span></button><button class="bottom-nav-item text-gray-400 flex flex-col items-center gap-1 text-xs font-medium px-4"><i class="fas fa-ellipsis-h text-xl"></i><span>Ещё</span></button></nav><script>let currentStationId=null,selectedSize=null,selectedTariff=null;document.addEventListener('DOMContentLoaded',loadLocations);async function loadLocations(){try{const r=await fetch('/api/locations'),s=await r.json();renderLocations(s)}catch(e){console.error(e)}}function renderLocations(s){const c=document.getElementById('locations-list');c.innerHTML='';s.forEach(x=>{const d=document.createElement('div');d.className='bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex gap-4 active:scale-[0.99] transition cursor-pointer';d.onclick=()=>openBooking(x);let i='fa-shopping-bag',t='ТЦ';if(x.type==='theatre'){i='fa-theater-masks';t='Театр'}if(x.type==='mice'){i='fa-briefcase';t='MICE'}d.innerHTML=\`<div class="w-16 h-16 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600 text-2xl flex-shrink-0"><i class="fas \${i}"></i></div><div class="flex-1"><div class="flex justify-between items-start"><h3 class="font-bold text-gray-900">\${x.name}</h3><span class="text-xs font-bold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">\${t}</span></div><p class="text-xs text-gray-500 mb-2">\${x.address}</p><div class="flex gap-2"><span class="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded flex items-center gap-1"><i class="fas fa-cube text-[10px]"></i> S, M, L</span></div></div>\`;c.appendChild(d)})}async function openBooking(s){currentStationId=s.id;document.getElementById('booking-station-name').textContent=s.name;document.getElementById('view-home').classList.add('hidden');document.getElementById('view-booking').classList.remove('hidden');const c=document.getElementById('cells-selection');c.innerHTML='<div class="text-center py-8"><i class="fas fa-spinner fa-spin text-blue-500"></i></div>';try{const r=await fetch(\`/api/location/\${s.id}\`),d=await r.json();renderCellsSelection(d.availability,d.tariffs)}catch(e){c.innerHTML='Error'}}function renderCellsSelection(cells,tariffs){const c=document.getElementById('cells-selection');c.innerHTML='';selectedSize=null;selectedTariff=null;updateBookBtn();const meta={'S':{name:'Small',dims:'30x40x50 см',icon:'fa-shopping-bag'},'M':{name:'Medium',dims:'50x50x50 см',icon:'fa-suitcase'},'L':{name:'Large',dims:'80x60x50 см',icon:'fa-suitcase-rolling'},'XL':{name:'X-Large',dims:'100x80x60 см',icon:'fa-box-open'}};if(tariffs.length===0){c.innerHTML='<div class="text-center py-4 text-gray-500">Нет тарифов</div>';return}tariffs.forEach(t=>{const k=t.size,m=meta[k]||{name:k,dims:'-',icon:'fa-box'},db=cells.find(x=>x.size===k)||{free:0},ok=db.free>0,d=document.createElement('div');d.className=\`border rounded-xl p-4 flex items-center justify-between transition cursor-pointer \${!ok?'opacity-50 bg-gray-50 grayscale':'hover:border-blue-400 bg-white'}\`;if(ok)d.onclick=()=>selectSize(k,t,d);d.innerHTML=\`<div class="flex items-center gap-4"><div class="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center text-gray-600 text-xl"><i class="fas \${m.icon}"></i></div><div><div class="font-bold text-gray-800 flex items-center gap-2">\${m.name} \${!ok?'<span class="text-xs text-red-500 bg-red-50 px-2 rounded">Занято</span>':''}</div><div class="text-xs text-gray-500">\${m.dims}</div></div></div><div class="text-right"><div class="font-bold text-blue-600">\${t.description}</div><div class="text-xs text-gray-400">\${db.free} своб.</div></div>\`;c.appendChild(d)})}function selectSize(s,t,el){selectedSize=s;selectedTariff=t;document.querySelectorAll('#cells-selection > div').forEach(d=>{d.classList.remove('border-blue-600','bg-blue-50','ring-2','ring-blue-100');d.classList.add('border-gray-200')});el.classList.remove('border-gray-200');el.classList.add('border-blue-600','bg-blue-50','ring-2','ring-blue-100');updateBookBtn()}function updateBookBtn(){const b=document.getElementById('btn-book');b.disabled=!selectedSize;if(selectedSize&&selectedTariff){const p=selectedTariff.price_initial===0?'Открыть бесплатно':\`Оплатить \${selectedTariff.price_initial}₽\`;b.textContent=p}else{b.textContent='Выберите размер'}}async function processBooking(){const b=document.getElementById('btn-book');b.disabled=true;b.innerHTML='<i class="fas fa-spinner fa-spin"></i> ...';try{const r=await fetch('/api/book',{method:'POST',body:JSON.stringify({station_id:currentStationId,size:selectedSize})}),d=await r.json();if(d.success){document.getElementById('success-cell-num').textContent=d.booking.cell_number;document.getElementById('success-code').textContent=d.booking.code;document.getElementById('success-price').textContent=\`Стоимость: \${d.booking.price_info}\`;document.getElementById('view-booking').classList.add('hidden');document.getElementById('view-success').classList.remove('hidden')}else{alert(d.message);b.disabled=false;b.textContent='Попробовать снова'}}catch(e){alert('Error');b.disabled=false}}function goHome(){document.getElementById('view-success').classList.add('hidden');document.getElementById('view-booking').classList.add('hidden');document.getElementById('view-home').classList.remove('hidden');selectedSize=null;selectedTariff=null}</script></body></html>`
+
+app.get('/*', (c) => c.html(html))
 
 export default app
