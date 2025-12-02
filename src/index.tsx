@@ -43,7 +43,20 @@ app.post('/api/book', async (c) => {
       user = await c.env.DB.prepare("SELECT * FROM users WHERE phone = ?").bind(phone).first()
   }
   if (user.is_blocked) return c.json({ success: false, error: 'Аккаунт заблокирован' }, 403)
-  const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE station_id = ? AND size = ? AND status = 'free' LIMIT 1").bind(stationId, size).first()
+  let cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE station_id = ? AND size = ? AND status = 'free' LIMIT 1").bind(stationId, size).first()
+  
+  // DEMO MODE: If no free cell, recycle a booked one (Infinite Inventory)
+  if (!cell) {
+      const busyCell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE station_id = ? AND size = ? LIMIT 1").bind(stationId, size).first()
+      if (busyCell) {
+            // Close previous booking
+            await c.env.DB.prepare("UPDATE bookings SET status = 'completed', end_time = CURRENT_TIMESTAMP WHERE cell_id = ? AND status = 'active'").bind(busyCell.id).run()
+            // Mark as free (temporarily, will be booked immediately below)
+            await c.env.DB.prepare("UPDATE cells SET status = 'free' WHERE id = ?").bind(busyCell.id).run()
+            cell = busyCell
+      }
+  }
+  
   if (!cell) return c.json({ error: 'Нет свободных ячеек' }, 400)
   const tariff: any = await c.env.DB.prepare("SELECT * FROM tariffs WHERE station_id = ? AND size = ?").bind(stationId, size).first()
   let price = tariff ? tariff.price_initial : 100;
