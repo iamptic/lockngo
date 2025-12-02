@@ -165,13 +165,31 @@ app.post('/api/station/scan', async (c) => {
 
 app.post('/api/hw/sync', async (c) => { 
     const { id, battery, wifi, error } = await c.req.json(); 
-    let stationId = 1; 
-    // Get screen content to send back to station
-    const station: any = await c.env.DB.prepare("SELECT screen_content, screen_mode FROM stations WHERE id = ?").bind(stationId).first();
+    let stationId = id || 1; 
     
+    // 1. Check for pending open commands (Remote Admin or QR)
+    const pending: any = await c.env.DB.prepare("SELECT id, cell_number FROM cells WHERE station_id = ? AND door_open = 1").bind(stationId).all();
+    const openCells = pending.results.map((r: any) => r.cell_number);
+
+    // 2. Auto-reset flags after sending to hardware (Command Acknowledged)
+    if (openCells.length > 0) {
+        // In a real system, we would wait for ACK, but for MVP we assume HW receives it
+        const ids = pending.results.map((r: any) => r.id).join(',');
+        await c.env.DB.prepare(`UPDATE cells SET door_open = 0 WHERE id IN (${ids})`).run();
+    }
+
+    // 3. Update Health
     await c.env.DB.prepare(`INSERT INTO station_health (station_id, battery_level, wifi_signal, last_heartbeat, error_msg) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?) ON CONFLICT(station_id) DO UPDATE SET battery_level = excluded.battery_level, wifi_signal = excluded.wifi_signal, last_heartbeat = CURRENT_TIMESTAMP, error_msg = excluded.error_msg`).bind(stationId, battery, wifi, error).run(); 
     
-    return c.json({ cmd: 'ok', screen: { mode: station?.screen_mode, content: station?.screen_content } }) 
+    // 4. Get screen content
+    const station: any = await c.env.DB.prepare("SELECT screen_content, screen_mode FROM stations WHERE id = ?").bind(stationId).first();
+
+    // Return commands to HW
+    return c.json({ 
+        cmd: 'ok', 
+        open: openCells, // Array of cell numbers ['A01', 'B02']
+        screen: { mode: station?.screen_mode, content: station?.screen_content } 
+    }) 
 })
 
 // API: Get history for specific cell
@@ -194,6 +212,17 @@ app.post('/api/admin/cell/open', async (c) => {
     await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE id = ?").bind(cellId).run();
     await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'remote_open', 'Remote open cell ' || ? || ' (ID: ' || ? || ')')").bind(cell.station_id, cell.cell_number, cellId).run();
     
+    return c.json({ success: true });
+})
+
+app.post('/api/admin/cell/status', async (c) => {
+    const { cellId, status } = await c.req.json(); // status: 'free', 'maintenance'
+    const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
+    if(!cell) return c.json({error: 'Cell not found'}, 404);
+
+    await c.env.DB.prepare("UPDATE cells SET status = ? WHERE id = ?").bind(status, cellId).run();
+    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'status_change', 'Changed cell ' || ? || ' status to ' || ?)").bind(cell.station_id, cell.cell_number, status).run();
+
     return c.json({ success: true });
 })
 
@@ -237,6 +266,11 @@ const adminHtml = `<!DOCTYPE html>
         </div>
         <button @click="remoteOpen(selectedCell.id)" class="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl mb-3 hover:bg-indigo-700"><i class="fas fa-lock-open mr-2"></i> Открыть удаленно</button>
         
+        <div class="flex gap-2 mb-3">
+            <button v-if="selectedCell.status !== 'maintenance'" @click="changeStatus(selectedCell.id, 'maintenance')" class="flex-1 bg-gray-100 text-gray-600 font-bold py-2 rounded-lg hover:bg-gray-200 text-xs uppercase">Заблокировать</button>
+            <button v-if="selectedCell.status === 'maintenance'" @click="changeStatus(selectedCell.id, 'free')" class="flex-1 bg-green-100 text-green-600 font-bold py-2 rounded-lg hover:bg-green-200 text-xs uppercase">Разблокировать</button>
+        </div>
+
         <!-- History Section -->
         <div class="mt-4">
             <div class="text-xs font-bold text-gray-400 uppercase mb-2">История событий</div>
@@ -263,12 +297,19 @@ const selectCell=async(cell)=>{
     const res = await fetch('/api/admin/cell/'+cell.id+'/history');
     if(res.ok) cellHistory.value = await res.json();
 };
+const changeStatus=async(id, status)=>{
+    if(!confirm('Изменить статус ячейки на '+status+'?')) return;
+    await fetch('/api/admin/cell/status',{method:'POST',body:JSON.stringify({cellId:id, status})});
+    alert('Статус изменен');
+    selectedCell.value.status = status; // Optimistic update
+    openStationDetail(activeStation.value.station.id);
+};
 const remoteOpen=async(id)=>{if(!confirm('Открыть ячейку удаленно? Это действие будет записано в лог.'))return;await fetch('/api/admin/cell/open',{method:'POST',body:JSON.stringify({cellId:id})});alert('Команда отправлена');selectedCell.value=null;openStationDetail(activeStation.value.station.id);};
 const openAllCells=async(sid)=>{const code=prompt('ВВЕДИТЕ "CONFIRM" ЧТОБЫ ОТКРЫТЬ ВСЕ ЯЧЕЙКИ. ЭТО ЭКСТРЕННОЕ ДЕЙСТВИЕ!');if(code!=='CONFIRM')return;await fetch('/api/admin/station/'+sid+'/open-all',{method:'POST'});alert('Команда массового открытия отправлена!');openStationDetail(sid)};
 const updateTariff=async(t)=>{await fetch('/api/admin/tariffs',{method:'POST',body:JSON.stringify({id:t.id,price:t.price_initial})});};
 const updateRole=async(u)=>{await fetch('/api/admin/users/role',{method:'POST',body:JSON.stringify({userId:u.id,role:u.role})});alert('Роль обновлена')};
 const updateScreen=async(s)=>{await fetch('/api/admin/station/'+s.id+'/screen',{method:'POST',body:JSON.stringify({content:s.screen_content,mode:s.screen_mode})});alert('Экран обновлен')};
-setInterval(()=>{if(auth.value && page.value==='dashboard')fetchData()},5000);return{auth,loginPass,doLogin,page,menu,stats,stations,users,logs,activeStation,selectedCell,cellHistory,setPage,openStationDetail,selectCell,remoteOpen,openAllCells,updateTariff,updateRole,updateScreen}}}).mount('#app');</script></body></html>`
+setInterval(()=>{if(auth.value && page.value==='dashboard')fetchData()},5000);return{auth,loginPass,doLogin,page,menu,stats,stations,users,logs,activeStation,selectedCell,cellHistory,setPage,openStationDetail,selectCell,remoteOpen,openAllCells,updateTariff,updateRole,updateScreen,changeStatus}}}).mount('#app');</script></body></html>`
 
 
 const userHtml = `<!DOCTYPE html>
