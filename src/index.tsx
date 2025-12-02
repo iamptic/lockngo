@@ -163,6 +163,20 @@ app.post('/api/station/scan', async (c) => {
     return c.json({ success: true, open_cell: booking.cell_number });
 })
 
+app.post('/api/user/open', async (c) => {
+    const { accessCode } = await c.req.json();
+    // Verify booking is active and valid
+    const booking: any = await c.env.DB.prepare("SELECT b.*, c.cell_number, c.station_id FROM bookings b JOIN cells c ON b.cell_id = c.id WHERE b.access_code = ? AND b.status = 'active'").bind(accessCode).first();
+    
+    if (!booking) return c.json({ error: 'Booking not found or expired' }, 400);
+
+    // Open logic
+    await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE id = ?").bind(booking.cell_id).run();
+    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'user_open', 'Client opened cell ' || ? || ' via app')").bind(booking.station_id, booking.cell_number).run();
+
+    return c.json({ success: true });
+})
+
 app.post('/api/hw/sync', async (c) => { 
     const { id, battery, wifi, error } = await c.req.json(); 
     let stationId = id || 1; 
@@ -322,6 +336,7 @@ const userHtml = `<!DOCTYPE html>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
         body{font-family:'Inter',sans-serif;}
@@ -410,30 +425,44 @@ const userHtml = `<!DOCTYPE html>
             </div>\`;
 
         const SuccessView=(data)=>\`
-            <div class="flex flex-col h-full brand-gradient text-white p-8 items-center justify-center text-center">
-                <div class="w-24 h-24 bg-white/20 backdrop-blur rounded-full flex items-center justify-center text-4xl mb-4 animate-bounce"><i class="fas fa-unlock-alt"></i></div>
-                <h1 class="text-3xl font-bold mb-2">Ячейка открыта!</h1>
+            <div class="flex flex-col h-full brand-gradient text-white p-6 items-center justify-center text-center overflow-y-auto">
+                <div class="w-16 h-16 bg-white/20 backdrop-blur rounded-full flex items-center justify-center text-2xl mb-4 animate-bounce"><i class="fas fa-unlock-alt"></i></div>
+                <h1 class="text-2xl font-bold mb-2">Оплачено!</h1>
                 
-                <!-- QR CODE FOR STATION SCANNER -->
-                <div class="bg-white text-gray-900 rounded-2xl p-6 w-full shadow-2xl mb-6">
-                    <div class="text-xs uppercase font-bold text-gray-400 mb-2">Покажите сканеру на станции</div>
-                    <div class="flex justify-center mb-4">
-                        <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=\${data.accessCode}" class="rounded-lg border-4 border-gray-100">
+                <!-- QR CODE CARD -->
+                <div class="bg-white text-gray-900 rounded-2xl p-6 w-full max-w-sm shadow-2xl mb-6 relative overflow-hidden">
+                    <div class="absolute top-0 left-0 w-full h-2 bg-indigo-500"></div>
+                    <div class="text-xs uppercase font-bold text-gray-400 mb-4 tracking-wider">Ваш ключ доступа</div>
+                    
+                    <!-- JS GENERATED QR -->
+                    <div class="flex justify-center mb-6 relative">
+                        <div id="qrcode" class="p-2 border-4 border-gray-100 rounded-xl"></div>
+                        <div class="absolute inset-0 flex items-center justify-center pointer-events-none opacity-10">
+                             <i class="fas fa-cube text-6xl text-indigo-900"></i>
+                        </div>
                     </div>
-                    <div class="h-px bg-gray-100 w-full mb-4"></div>
-                    <div class="flex justify-between">
+                    
+                    <div class="flex justify-between items-end border-t border-gray-100 pt-4">
                         <div class="text-left">
-                            <div class="text-gray-400 text-xs uppercase font-bold">Ячейка</div>
-                            <div class="text-4xl font-black text-indigo-600">\${data.cellNumber}</div>
+                            <div class="text-gray-400 text-[10px] uppercase font-bold">Номер ячейки</div>
+                            <div class="text-5xl font-black text-indigo-600 leading-none">\${data.cellNumber}</div>
                         </div>
                         <div class="text-right">
-                            <div class="text-gray-400 text-xs uppercase font-bold">Действует до</div>
-                            <div class="text-sm font-bold text-gray-700">\${new Date(data.validUntil).toLocaleTimeString().slice(0,5)}</div>
+                            <div class="text-gray-400 text-[10px] uppercase font-bold">Действует до</div>
+                            <div class="text-lg font-bold text-gray-700 leading-none">\${new Date(data.validUntil).toLocaleTimeString().slice(0,5)}</div>
                         </div>
                     </div>
                 </div>
 
-                <button onclick="navigate('home')" class="mt-auto w-full py-4 text-white/80 hover:text-white font-bold">Вернуться на главную</button>
+                <!-- REMOTE OPEN BUTTON -->
+                <div class="w-full max-w-sm space-y-3">
+                    <button onclick="userRemoteOpen('\${data.accessCode}')" class="w-full bg-white text-indigo-600 font-bold py-4 rounded-xl shadow-lg hover:bg-indigo-50 active:scale-95 transition flex items-center justify-center gap-2">
+                        <i class="fas fa-wifi"></i> Открыть удаленно
+                    </button>
+                    <button onclick="navigate('home')" class="w-full py-3 text-white/60 hover:text-white font-bold text-sm">
+                        Вернуться на главную
+                    </button>
+                </div>
             </div>\`;
 
         let mapInstance = null;
@@ -443,7 +472,51 @@ const userHtml = `<!DOCTYPE html>
             const app=document.getElementById('app');
             if(view==='home'){ app.innerHTML=HomeView(); loadStations(); }
             else if(view==='booking'){ app.innerHTML=BookingView(params); loadTariffs(params.id); if(!state.userPhone) setTimeout(openAuth, 500); }
-            else if(view==='success'){ app.innerHTML=SuccessView(params); }
+            else if(view==='success'){ 
+                app.innerHTML=SuccessView(params); 
+                setTimeout(() => {
+                    // Generate QR locally
+                    document.getElementById('qrcode').innerHTML = '';
+                    new QRCode(document.getElementById("qrcode"), {
+                        text: params.accessCode,
+                        width: 150,
+                        height: 150,
+                        colorDark : "#4F46E5",
+                        colorLight : "#ffffff",
+                        correctLevel : QRCode.CorrectLevel.H
+                    });
+                }, 100);
+            }
+        }
+
+        async function userRemoteOpen(code) {
+            if(!confirm('Вы уверены, что находитесь рядом с ячейкой?')) return;
+            const btn = event.target.closest('button');
+            const originalText = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Открываем...';
+            
+            try {
+                const res = await fetch('/api/user/open', {
+                    method: 'POST',
+                    body: JSON.stringify({ accessCode: code })
+                });
+                const data = await res.json();
+                if(data.success) {
+                    btn.classList.remove('text-indigo-600', 'bg-white');
+                    btn.classList.add('bg-green-500', 'text-white');
+                    btn.innerHTML = '<i class="fas fa-check"></i> Открыто!';
+                    alert('Ячейка должна открыться в течение 5 секунд!');
+                } else {
+                    alert('Ошибка: ' + data.error);
+                    btn.disabled = false;
+                    btn.innerHTML = originalText;
+                }
+            } catch(e) {
+                alert('Ошибка соединения');
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+            }
         }
 
         async function loadStations(){
