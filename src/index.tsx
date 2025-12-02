@@ -1,287 +1,604 @@
 import { Hono } from 'hono'
+import { serveStatic } from 'hono/cloudflare-workers'
+import { renderer } from './renderer'
 import { cors } from 'hono/cors'
 
-type Bindings = { DB: D1Database; ASSETS: Fetcher }
-const app = new Hono<{ Bindings: Bindings }>()
+// --- Types ---
+interface Env {
+  DB: D1Database
+}
+
+type Station = { id: number; name: string; type: string; address: string; hardware_key: string }
+type Cell = { id: number; station_id: number; cell_number: number; size: string; status: 'free' | 'booked' | 'occupied'; door_open: number }
+type Tariff = { id: number; station_id: number; size: string; price_initial: number; description: string }
+
+// --- App Setup ---
+const app = new Hono<{ Bindings: Env }>()
+
 app.use('/*', cors())
+app.use('/static/*', serveStatic({ root: './public' }))
 
-const api = new Hono<{ Bindings: Bindings }>()
+// --- API Backend ---
 
-// --- API ---
-api.get('/locations', async (c) => {
-  try { return c.json((await c.env.DB.prepare('SELECT * FROM stations').all()).results) } 
-  catch (e) { return c.json({ error: e.message }, 500) }
+// 1. Client API
+app.get('/api/locations', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM stations').all()
+  return c.json(results)
 })
 
-api.get('/location/:id', async (c) => {
+app.get('/api/location/:id', async (c) => {
   const id = c.req.param('id')
   const station = await c.env.DB.prepare('SELECT * FROM stations WHERE id = ?').bind(id).first()
-  if(!station) return c.json({error: 'Not found'}, 404)
-  const tariffs = (await c.env.DB.prepare('SELECT * FROM tariffs WHERE station_id = ?').bind(id).all()).results
-  const { results: cells } = await c.env.DB.prepare('SELECT * FROM cells WHERE station_id = ? ORDER BY cell_number').bind(id).all()
+  const cells = await c.env.DB.prepare('SELECT * FROM cells WHERE station_id = ?').bind(id).all()
+  const tariffs = await c.env.DB.prepare('SELECT * FROM tariffs WHERE station_id = ?').bind(id).all()
   
-  // Агрегация для клиента
-  const availability = []
-  const sizes = ['S', 'M', 'L', 'XL']
-  sizes.forEach(sz => {
-    const total = cells.filter(c => c.size === sz).length
-    if(total > 0) {
-      const free = cells.filter(c => c.size === sz && c.status === 'free').length
-      availability.push({ size: sz, total, free })
-    }
+  // Count available by size
+  const available = {
+    S: cells.results.filter((cell: any) => cell.size === 'S' && cell.status === 'free').length,
+    M: cells.results.filter((cell: any) => cell.size === 'M' && cell.status === 'free').length,
+    L: cells.results.filter((cell: any) => cell.size === 'L' && cell.status === 'free').length,
+    XL: cells.results.filter((cell: any) => cell.size === 'XL' && cell.status === 'free').length,
+  }
+
+  return c.json({ station, available, tariffs: tariffs.results })
+})
+
+app.post('/api/book', async (c) => {
+  const { stationId, size } = await c.req.json()
+  
+  // Find free cell
+  const cell: any = await c.env.DB.prepare(
+    "SELECT * FROM cells WHERE station_id = ? AND size = ? AND status = 'free' LIMIT 1"
+  ).bind(stationId, size).first()
+
+  if (!cell) return c.json({ error: 'Нет свободных ячеек' }, 400)
+
+  // Update status
+  await c.env.DB.prepare(
+    "UPDATE cells SET status = 'booked' WHERE id = ?"
+  ).bind(cell.id).run()
+
+  // Log
+  await c.env.DB.prepare(
+    "INSERT INTO logs (station_id, action, details) VALUES (?, 'booking', ?)"
+  ).bind(stationId, `Booking created for cell ${cell.cell_number} (${size})`).run()
+
+  return c.json({ 
+    success: true, 
+    cellNumber: cell.cell_number, 
+    accessCode: Math.floor(100000 + Math.random() * 900000) 
   })
-
-  return c.json({ station, tariffs, availability, cells_debug: cells })
 })
 
-api.post('/book', async (c) => {
-  const { station_id, size } = await c.req.json()
-  const cell = await c.env.DB.prepare(`SELECT id, cell_number FROM cells WHERE station_id = ? AND size = ? AND status = 'free' LIMIT 1`).bind(station_id, size).first()
-  if (!cell) return c.json({ success: false, message: 'Нет ячеек' }, 400)
-  const tariff = await c.env.DB.prepare(`SELECT * FROM tariffs WHERE station_id = ? AND size = ?`).bind(station_id, size).first()
-  const price = tariff ? tariff.price_initial : 0
-  const currency = tariff ? tariff.currency : 'RUB'
-  await c.env.DB.prepare("UPDATE cells SET status = 'booked' WHERE id = ?").bind(cell.id).run()
-  await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, ?, ?)").bind(station_id, 'booking', `Booked Cell #${cell.cell_number} (${size}). Price: ${price} ${currency}`).run()
-  return c.json({ success: true, booking: { id: Date.now(), cell_number: cell.cell_number, code: Math.floor(1000 + Math.random() * 9000), price_info: `${price} ${currency}`, station_id } })
+// 2. Admin API
+app.get('/api/admin/stats', async (c) => {
+  // Mock stats for dashboard
+  const totalStations = await c.env.DB.prepare('SELECT count(*) as c FROM stations').first('c')
+  const totalCells = await c.env.DB.prepare('SELECT count(*) as c FROM cells').first('c')
+  const activeBookings = await c.env.DB.prepare("SELECT count(*) as c FROM cells WHERE status != 'free'").first('c')
+  const revenue = 125000 // Mock revenue for demo
+  
+  return c.json({ totalStations, totalCells, activeBookings, revenue })
 })
 
-// Админские функции
-api.post('/admin/open', async (c) => {
-  const { cell_id, station_id } = await c.req.json()
-  await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE id = ?").bind(cell_id).run()
-  await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, ?, ?)").bind(station_id, 'admin_open', `Remote open cell #${cell_id}`).run()
+app.get('/api/admin/cells', async (c) => {
+  const cells = await c.env.DB.prepare(`
+    SELECT c.*, s.name as station_name 
+    FROM cells c 
+    JOIN stations s ON c.station_id = s.id
+    ORDER BY s.name, c.cell_number
+  `).all()
+  return c.json(cells.results)
+})
+
+app.post('/api/admin/open', async (c) => {
+  const { cellId } = await c.req.json()
+  await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE id = ?").bind(cellId).run()
+  await c.env.DB.prepare("INSERT INTO logs (action, details) VALUES ('admin_open', ?)").bind(`Force open cell ID ${cellId}`).run()
   return c.json({ success: true })
 })
 
-api.post('/admin/reset', async (c) => {
-    const { cell_id } = await c.req.json()
-    await c.env.DB.prepare("UPDATE cells SET status = 'free', door_open = 0 WHERE id = ?").bind(cell_id).run()
-    return c.json({ success: true })
+app.get('/api/admin/logs', async (c) => {
+  const logs = await c.env.DB.prepare('SELECT * FROM logs ORDER BY created_at DESC LIMIT 50').all()
+  return c.json(logs.results)
 })
 
-api.post('/hardware/sync', async (c) => c.json({ command: 'ok', timestamp: Date.now() }))
-app.route('/api', api)
+// 3. Hardware API
+app.post('/api/hardware/sync', async (c) => {
+  // Hardware logic here
+  return c.json({ command: 'sync_ok' })
+})
 
 
-// --- HTML (Client + Admin) ---
-const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Lock&Go</title><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><style>@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');body{font-family:'Inter',sans-serif}.hide-scrollbar::-webkit-scrollbar{display:none}</style></head>
+// --- Frontend Application (Embedded) ---
+app.get('*', (c) => {
+  return c.html(`
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Lock&Go Platform</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
 <body class="bg-gray-50 h-screen flex flex-col overflow-hidden">
-    
-    <!-- CLIENT APP -->
-    <div id="app-client" class="flex-1 flex flex-col relative">
-        <header class="bg-white px-6 py-4 shadow-sm flex justify-between items-center sticky top-0 z-20">
-            <div class="flex items-center gap-2 font-bold text-xl"><div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white"><i class="fas fa-cube"></i></div>Lock<span class="text-blue-600">&</span>Go</div>
-            <div onclick="openAdminAuth()" class="text-gray-300 hover:text-gray-600 cursor-pointer on-hold"><i class="fas fa-cog"></i></div>
-        </header>
 
-        <!-- TABS -->
-        <div id="tab-home" class="tab-content flex-1 overflow-y-auto pb-20 hide-scrollbar">
-            <div class="mx-4 mt-4 p-6 bg-gradient-to-r from-gray-900 to-blue-900 rounded-2xl text-white shadow-lg relative overflow-hidden mb-6">
-                <div class="relative z-10"><h2 class="text-xl font-bold">Свободные руки</h2><h3 class="text-lg font-light opacity-90 mb-4">успешные сделки</h3><button onclick="document.getElementById('locations-list').scrollIntoView({behavior:'smooth'})" class="bg-white text-blue-900 px-4 py-2 rounded-full text-sm font-bold shadow-md">Найти локер</button></div>
-                <i class="fas fa-shopping-bag absolute -bottom-4 -right-4 text-8xl opacity-10 transform rotate-12"></i>
-            </div>
-            <div class="px-4 pb-4 space-y-4" id="locations-list"><div class="text-center py-10 text-gray-400">Загрузка...</div></div>
-        </div>
-
-        <div id="tab-my" class="tab-content hidden flex-1 overflow-y-auto pb-20 p-4">
-            <h2 class="text-2xl font-bold mb-4">Мои аренды</h2>
-            <div id="my-bookings-list" class="space-y-3">
-                <div class="text-gray-400 text-center py-10">У вас нет активных аренд</div>
-            </div>
-        </div>
-
-        <!-- MODALS -->
-        <div id="modal-booking" class="hidden fixed inset-0 bg-white z-50 flex flex-col">
-            <div class="p-4 border-b flex gap-4 items-center"><button onclick="closeModal()" class="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center"><i class="fas fa-arrow-left"></i></button><h2 class="font-bold text-lg" id="bk-name">...</h2></div>
-            <div class="flex-1 overflow-y-auto p-6"><h3 class="font-bold mb-4">Выберите размер</h3><div id="bk-list" class="space-y-3"></div></div>
-            <div class="p-6 border-t"><button id="bk-btn" onclick="doBook()" class="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg" disabled>Выберите размер</button></div>
-        </div>
-
-        <div id="modal-success" class="hidden fixed inset-0 bg-blue-600 text-white z-50 flex flex-col items-center justify-center p-8 text-center">
-            <div class="w-24 h-24 bg-white rounded-full flex items-center justify-center mb-6 animate-bounce"><i class="fas fa-check text-4xl text-blue-600"></i></div>
-            <h2 class="text-3xl font-bold mb-2">Готово!</h2>
-            <div class="bg-white/10 backdrop-blur rounded-xl p-6 w-full max-w-sm mb-8 border border-white/20">
-                <div class="text-sm opacity-70">Ячейка №</div><div class="text-5xl font-mono font-bold mb-4" id="sc-num">--</div>
-                <div class="text-sm opacity-70">Код</div><div class="text-2xl font-mono font-bold tracking-widest" id="sc-code">----</div>
-            </div>
-            <button onclick="finishBook()" class="bg-white text-blue-600 px-8 py-3 rounded-full font-bold">OK</button>
-        </div>
-
-        <!-- NAV -->
-        <nav class="fixed bottom-0 w-full bg-white border-t flex justify-around py-3 pb-safe z-40">
-            <button onclick="switchTab('home')" class="nav-btn active text-blue-600 flex flex-col items-center text-xs px-4"><i class="fas fa-map-marked-alt text-xl"></i>Карта</button>
-            <button onclick="switchTab('my')" class="nav-btn text-gray-400 flex flex-col items-center text-xs px-4"><i class="fas fa-ticket-alt text-xl"></i>Аренды</button>
-        </nav>
-    </div>
-
-    <!-- ADMIN APP -->
-    <div id="app-admin" class="hidden flex-1 flex flex-col bg-gray-100">
-        <header class="bg-gray-800 text-white px-6 py-4 shadow flex justify-between items-center">
-            <div class="font-bold"><i class="fas fa-user-shield mr-2"></i>Инженерное меню</div>
-            <button onclick="closeAdmin()" class="text-gray-400">Выход</button>
-        </header>
-        <div class="flex-1 overflow-y-auto p-4">
-            <div class="mb-4"><label class="block text-xs font-bold uppercase text-gray-500 mb-1">Выбор станции</label><select id="admin-station-select" onchange="loadAdminStation()" class="w-full p-3 rounded shadow bg-white"></select></div>
-            <div id="admin-cells-grid" class="grid grid-cols-2 gap-4"></div>
-        </div>
-    </div>
+    <!-- App Container -->
+    <div id="app" class="flex-1 flex flex-col h-full relative"></div>
 
     <script>
-        // --- LOGIC ---
-        let currentStation=null, selSize=null, selTariff=null;
-        const API='/api';
+        // --- State Management ---
+        const state = {
+            view: 'home', // home, booking, success, admin, admin_login
+            activeStation: null,
+            activeStationData: null,
+            bookingResult: null,
+            isAdmin: false
+        };
 
-        // Init
-        if(window.location.pathname === '/admin') openAdmin();
-        else loadLocations();
-        loadMyBookings();
+        // --- Views Components ---
 
-        // --- CLIENT ---
-        async function loadLocations(){
-            const r=await fetch(API+'/locations');
-            const d=await r.json();
-            const c=document.getElementById('locations-list');
-            const s=document.getElementById('admin-station-select');
-            c.innerHTML=''; s.innerHTML='';
-            d.forEach(x=>{
-                // Client Card
-                let i='fa-shopping-bag',t='ТЦ';
-                if(x.type==='theatre'){i='fa-theater-masks';t='Театр'}
-                if(x.type==='mice'){i='fa-briefcase';t='MICE'}
-                c.innerHTML+=\`<div onclick="openBookModal(\${x.id}, '\${x.name}')" class="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex gap-4 active:scale-[0.99] transition cursor-pointer"><div class="w-16 h-16 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600 text-2xl shrink-0"><i class="fas \${i}"></i></div><div class="flex-1"><div class="flex justify-between"><h3 class="font-bold">\${x.name}</h3><span class="text-xs font-bold bg-blue-100 text-blue-700 px-2 py-1 rounded">\${t}</span></div><p class="text-xs text-gray-500 mt-1">\${x.address}</p></div></div>\`;
-                // Admin Option
-                s.innerHTML+=\`<option value="\${x.id}">\${x.name}</option>\`;
-            });
-            if(d.length>0) loadAdminStation(d[0].id);
-        }
-
-        async function openBookModal(id, name){
-            currentStation=id;
-            document.getElementById('bk-name').textContent=name;
-            document.getElementById('modal-booking').classList.remove('hidden');
-            const c=document.getElementById('bk-list');
-            c.innerHTML='Loading...';
-            const r=await fetch(API+\`/location/\${id}\`);
-            const d=await r.json();
-            c.innerHTML='';
-            
-            const sizes={S:'Small',M:'Medium',L:'Large',XL:'X-Large'};
-            if(d.tariffs.length===0) c.innerHTML='Нет тарифов';
-            
-            d.tariffs.forEach(t=>{
-                const sz=t.size;
-                const av=d.availability.find(a=>a.size===sz)||{free:0};
-                const ok=av.free>0;
-                const el=document.createElement('div');
-                el.className=\`border rounded-xl p-4 flex justify-between items-center \${ok?'bg-white':'bg-gray-50 opacity-50'}\`;
-                el.onclick=()=>{
-                    if(!ok) return;
-                    selSize=sz; selTariff=t;
-                    document.querySelectorAll('#bk-list > div').forEach(x=>x.classList.remove('border-blue-600','ring-2'));
-                    el.classList.add('border-blue-600','ring-2');
-                    document.getElementById('bk-btn').disabled=false;
-                    document.getElementById('bk-btn').textContent=t.price_initial===0?'Бесплатно':\`Opalтить \${t.price_initial}₽\`;
-                };
-                el.innerHTML=\`<div><div class="font-bold">\${sizes[sz]||sz}</div><div class="text-xs text-gray-500">\${t.description}</div></div><div class="font-bold \${ok?'text-blue-600':'text-red-500'}">\${ok?av.free+' free':'Full'}</div>\`;
-                c.appendChild(el);
-            });
-        }
-
-        async function doBook(){
-            const btn=document.getElementById('bk-btn');
-            btn.disabled=true; btn.innerText='Processing...';
-            try{
-                const r=await fetch(API+'/book',{method:'POST',body:JSON.stringify({station_id:currentStation,size:selSize})});
-                const d=await r.json();
-                if(d.success){
-                    // Save to local storage
-                    const booking={...d.booking, stationName: document.getElementById('bk-name').textContent, date: new Date().toLocaleString()};
-                    const list=JSON.parse(localStorage.getItem('bookings')||'[]');
-                    list.unshift(booking);
-                    localStorage.setItem('bookings', JSON.stringify(list));
-                    loadMyBookings();
-                    
-                    // Show success
-                    document.getElementById('sc-num').textContent=d.booking.cell_number;
-                    document.getElementById('sc-code').textContent=d.booking.code;
-                    document.getElementById('modal-booking').classList.add('hidden');
-                    document.getElementById('modal-success').classList.remove('hidden');
-                } else { alert(d.message); }
-            } catch(e){ alert('Error'); }
-            btn.disabled=false;
-        }
-
-        function finishBook(){
-            document.getElementById('modal-success').classList.add('hidden');
-            switchTab('my');
-        }
-
-        function closeModal(){ document.getElementById('modal-booking').classList.add('hidden'); }
-
-        function switchTab(t){
-            document.querySelectorAll('.tab-content').forEach(x=>x.classList.add('hidden'));
-            document.getElementById('tab-'+t).classList.remove('hidden');
-            document.querySelectorAll('.nav-btn').forEach(x=>x.classList.replace('text-blue-600','text-gray-400'));
-            // Simple active state logic
-            event.currentTarget.classList.replace('text-gray-400','text-blue-600');
-        }
-
-        function loadMyBookings(){
-            const l=JSON.parse(localStorage.getItem('bookings')||'[]');
-            const c=document.getElementById('my-bookings-list');
-            if(l.length===0) return;
-            c.innerHTML='';
-            l.forEach(b=>{
-                c.innerHTML+=\`<div class="bg-white p-4 rounded-xl shadow border-l-4 border-blue-600">
-                    <div class="flex justify-between font-bold"><span>\${b.stationName}</span><span>#\${b.cell_number}</span></div>
-                    <div class="text-xs text-gray-500 mt-1">Код: <span class="font-mono text-lg text-black ml-2">\${b.code}</span></div>
-                    <div class="text-xs text-gray-400 mt-2">\${b.date}</div>
-                </div>\`;
-            });
-        }
-
-        // --- ADMIN ---
-        function openAdminAuth(){
-            if(prompt('Пароль инженера:')==='12345') openAdmin();
-        }
-        function openAdmin(){
-            document.getElementById('app-client').classList.add('hidden');
-            document.getElementById('app-admin').classList.remove('hidden');
-            loadAdminStation(document.getElementById('admin-station-select').value || 1);
-        }
-        function closeAdmin(){
-            document.getElementById('app-admin').classList.add('hidden');
-            document.getElementById('app-client').classList.remove('hidden');
-        }
-        async function loadAdminStation(id){
-            if(!id) id = document.getElementById('admin-station-select').value;
-            const c=document.getElementById('admin-cells-grid');
-            c.innerHTML='Loading...';
-            const r=await fetch(API+\`/location/\${id}\`);
-            const d=await r.json();
-            c.innerHTML='';
-            d.cells_debug.forEach(cell=>{
-                const col=cell.status==='free'?'bg-green-100 text-green-800':(cell.status==='occupied'?'bg-red-100 text-red-800':'bg-yellow-100');
-                const door=cell.door_open?'border-red-500 border-2':'border-transparent border';
-                c.innerHTML+=\`<div class="p-4 rounded shadow \${col} \${door}">
-                    <div class="font-bold text-xl flex justify-between">#\${cell.cell_number} <span class="text-xs opacity-50">\${cell.size}</span></div>
-                    <div class="text-xs uppercase font-bold mt-1">\${cell.status}</div>
-                    <div class="text-xs mt-1">\${cell.door_open?'DOOR OPEN':'DOOR CLOSED'}</div>
-                    <div class="mt-3 flex gap-2">
-                        <button onclick="adminAction('open', \${cell.id}, \${id})" class="bg-white/50 px-2 py-1 rounded text-xs font-bold border">OPEN</button>
-                        <button onclick="adminAction('reset', \${cell.id}, \${id})" class="bg-white/50 px-2 py-1 rounded text-xs font-bold border">RESET</button>
+        function AdminLoginView() {
+            return \`
+                <div class="flex items-center justify-center h-full bg-gray-900">
+                    <div class="bg-white p-8 rounded-lg shadow-xl w-80">
+                        <div class="text-center mb-6">
+                            <div class="text-4xl text-indigo-600 mb-2"><i class="fas fa-user-shield"></i></div>
+                            <h2 class="text-xl font-bold">Вход в систему</h2>
+                            <p class="text-gray-500 text-sm">Lock&Go Enterprise</p>
+                        </div>
+                        <input type="password" id="adminPass" placeholder="Пароль администратора" class="w-full p-3 border rounded mb-4 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        <button onclick="checkAdmin()" class="w-full bg-indigo-600 text-white py-3 rounded font-bold hover:bg-indigo-700 transition">Войти</button>
+                        <button onclick="navigate('home')" class="w-full mt-2 text-gray-400 text-sm hover:text-gray-600">Вернуться на сайт</button>
                     </div>
-                </div>\`;
-            });
+                </div>
+            \`;
         }
-        async function adminAction(act, cid, sid){
-            if(!confirm('Sure?')) return;
-            await fetch(API+\`/admin/\${act}\`,{method:'POST',body:JSON.stringify({cell_id:cid, station_id:sid})});
-            loadAdminStation(sid);
-        }
-    </script>
-</body></html>`;
 
-app.get('/*', (c) => c.html(html))
+        function AdminDashboardView() {
+            setTimeout(loadAdminStats, 100);
+            return \`
+                <div class="flex h-full bg-gray-100">
+                    <!-- Sidebar -->
+                    <div class="w-64 bg-gray-900 text-white flex flex-col hidden md:flex">
+                        <div class="p-6 border-b border-gray-800">
+                            <h1 class="text-2xl font-bold text-indigo-400"><i class="fas fa-cubes mr-2"></i>Lock&Go</h1>
+                            <p class="text-xs text-gray-500 mt-1">Enterprise Panel</p>
+                        </div>
+                        <nav class="flex-1 p-4 space-y-2">
+                            <a href="#" onclick="renderAdminTab('dashboard')" class="block p-3 rounded bg-gray-800 text-white"><i class="fas fa-chart-line w-6"></i> Обзор</a>
+                            <a href="#" onclick="renderAdminTab('cells')" class="block p-3 rounded hover:bg-gray-800 text-gray-300"><i class="fas fa-th w-6"></i> Управление ячейками</a>
+                            <a href="#" onclick="renderAdminTab('tariffs')" class="block p-3 rounded hover:bg-gray-800 text-gray-300"><i class="fas fa-tags w-6"></i> Тарифы</a>
+                            <a href="#" onclick="renderAdminTab('logs')" class="block p-3 rounded hover:bg-gray-800 text-gray-300"><i class="fas fa-list w-6"></i> Журнал событий</a>
+                        </nav>
+                        <div class="p-4 border-t border-gray-800">
+                             <button onclick="logoutAdmin()" class="flex items-center text-gray-400 hover:text-white"><i class="fas fa-sign-out-alt mr-2"></i> Выйти</button>
+                        </div>
+                    </div>
+
+                    <!-- Mobile Header -->
+                    <div class="md:hidden absolute top-0 left-0 w-full bg-gray-900 text-white p-4 flex justify-between items-center z-50">
+                        <div class="font-bold">Lock&Go Admin</div>
+                        <button onclick="logoutAdmin()"><i class="fas fa-sign-out-alt"></i></button>
+                    </div>
+
+                    <!-- Content -->
+                    <div class="flex-1 overflow-auto p-4 md:p-8 mt-12 md:mt-0" id="adminContent">
+                        <!-- Dashboard Tab Default -->
+                        <h2 class="text-2xl font-bold mb-6">Обзор системы</h2>
+                        
+                        <!-- Stats Cards -->
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+                            <div class="bg-white p-6 rounded-lg shadow border-l-4 border-green-500">
+                                <div class="text-gray-500 text-sm">Выручка (сегодня)</div>
+                                <div class="text-2xl font-bold" id="statRevenue">Loading...</div>
+                            </div>
+                            <div class="bg-white p-6 rounded-lg shadow border-l-4 border-blue-500">
+                                <div class="text-gray-500 text-sm">Активные аренды</div>
+                                <div class="text-2xl font-bold" id="statActive">Loading...</div>
+                            </div>
+                            <div class="bg-white p-6 rounded-lg shadow border-l-4 border-indigo-500">
+                                <div class="text-gray-500 text-sm">Всего станций</div>
+                                <div class="text-2xl font-bold" id="statStations">Loading...</div>
+                            </div>
+                             <div class="bg-white p-6 rounded-lg shadow border-l-4 border-red-500">
+                                <div class="text-gray-500 text-sm">Инциденты</div>
+                                <div class="text-2xl font-bold">0</div>
+                            </div>
+                        </div>
+
+                        <!-- Charts Area -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div class="bg-white p-6 rounded-lg shadow">
+                                <h3 class="font-bold mb-4">Загрузка по часам</h3>
+                                <div class="h-64 bg-gray-50 flex items-center justify-center text-gray-400">
+                                    [График загрузки]
+                                </div>
+                            </div>
+                             <div class="bg-white p-6 rounded-lg shadow">
+                                <h3 class="font-bold mb-4">Популярные локации</h3>
+                                <div id="locationsList" class="space-y-3">
+                                    Loading...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            \`;
+        }
+
+        // --- Client Views (As before) ---
+        function HomeView() {
+            return \`
+                <!-- Header -->
+                <div class="bg-white shadow-sm sticky top-0 z-10">
+                    <div class="px-4 py-3 flex justify-between items-center">
+                        <div class="flex items-center">
+                            <div class="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold mr-2"><i class="fas fa-box"></i></div>
+                            <span class="font-bold text-lg text-gray-800">Lock&Go</span>
+                        </div>
+                        <div class="flex gap-3">
+                            <button onclick="navigate('admin_login')" class="text-gray-400 hover:text-indigo-600"><i class="fas fa-cog"></i></button>
+                            <div class="w-8 h-8 bg-gray-200 rounded-full flex items-center justify-center text-gray-500"><i class="fas fa-user"></i></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Categories -->
+                    <div class="px-4 pb-2 flex gap-2 overflow-x-auto hide-scrollbar">
+                        <button class="px-4 py-1.5 bg-gray-900 text-white rounded-full text-sm whitespace-nowrap">Все</button>
+                        <button class="px-4 py-1.5 bg-white border border-gray-200 text-gray-600 rounded-full text-sm whitespace-nowrap">Торговые центры</button>
+                        <button class="px-4 py-1.5 bg-white border border-gray-200 text-gray-600 rounded-full text-sm whitespace-nowrap">Вокзалы</button>
+                        <button class="px-4 py-1.5 bg-white border border-gray-200 text-gray-600 rounded-full text-sm whitespace-nowrap">Театры</button>
+                    </div>
+                </div>
+
+                <!-- Promo Banner -->
+                <div class="p-4">
+                    <div class="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-6 text-white shadow-lg">
+                        <h2 class="text-xl font-bold mb-1">Свободные руки —</h2>
+                        <h2 class="text-xl font-bold mb-2">успешные сделки</h2>
+                        <p class="text-indigo-100 text-sm mb-4">Оставь вещи в безопасном месте</p>
+                        <button class="bg-white text-indigo-600 px-4 py-2 rounded-lg text-sm font-bold shadow">Найти локер рядом</button>
+                    </div>
+                </div>
+
+                <!-- Locations List -->
+                <div class="flex-1 overflow-y-auto px-4 pb-20 space-y-4" id="locations-container">
+                    <div class="text-center py-10 text-gray-400"><i class="fas fa-circle-notch fa-spin text-2xl"></i><br>Загрузка локаций...</div>
+                </div>
+
+                <!-- Bottom Nav -->
+                <div class="bg-white border-t border-gray-200 fixed bottom-0 w-full px-6 py-3 flex justify-between items-center text-xs text-gray-400 z-20">
+                    <button class="flex flex-col items-center text-indigo-600 font-medium">
+                        <i class="fas fa-map-marker-alt text-lg mb-1"></i>
+                        Карта
+                    </button>
+                    <button class="flex flex-col items-center hover:text-gray-600">
+                        <i class="fas fa-ticket-alt text-lg mb-1"></i>
+                        Аренды
+                    </button>
+                    <button class="flex flex-col items-center hover:text-gray-600">
+                        <i class="fas fa-wallet text-lg mb-1"></i>
+                        Кошелек
+                    </button>
+                    <button class="flex flex-col items-center hover:text-gray-600">
+                        <i class="fas fa-ellipsis-h text-lg mb-1"></i>
+                        Ещё
+                    </button>
+                </div>
+            \`;
+        }
+
+        function BookingView() {
+            if (!state.activeStationData) return 'Loading...';
+            const s = state.activeStationData.station;
+            const t = state.activeStationData.tariffs;
+            const a = state.activeStationData.available;
+
+            return \`
+                <div class="flex flex-col h-full bg-white">
+                    <!-- Header -->
+                    <div class="px-4 py-4 border-b flex items-center sticky top-0 bg-white z-10">
+                        <button onclick="navigate('home')" class="mr-4 text-gray-600"><i class="fas fa-arrow-left text-lg"></i></button>
+                        <h1 class="font-bold text-lg truncate">\${s.name}</h1>
+                    </div>
+
+                    <div class="flex-1 overflow-y-auto p-4">
+                        <div class="bg-gray-50 rounded-xl p-4 mb-6 flex items-start gap-3">
+                            <i class="fas fa-map-pin text-indigo-600 mt-1"></i>
+                            <div>
+                                <div class="font-medium text-gray-900">\${s.address}</div>
+                                <div class="text-sm text-gray-500 mt-1">Открыто 24/7</div>
+                            </div>
+                        </div>
+
+                        <h3 class="font-bold text-gray-900 mb-3">Выберите размер ячейки</h3>
+                        <div class="space-y-3">
+                            \${['S', 'M', 'L'].map(size => {
+                                const tariff = t.find(x => x.size === size);
+                                const price = tariff ? tariff.price_initial : '?';
+                                const count = a[size] || 0;
+                                const disabled = count === 0;
+                                const dims = size === 'S' ? '30x40x50' : (size === 'M' ? '45x40x50' : '60x40x50');
+                                
+                                return \`
+                                    <label class="block relative">
+                                        <input type="radio" name="size" value="\${size}" class="peer sr-only" \${disabled ? 'disabled' : ''}>
+                                        <div class="p-4 rounded-xl border-2 border-gray-100 peer-checked:border-indigo-600 peer-checked:bg-indigo-50 transition flex justify-between items-center \${disabled ? 'opacity-50 grayscale' : 'cursor-pointer'}">
+                                            <div class="flex items-center gap-4">
+                                                <div class="w-10 h-10 rounded bg-gray-200 flex items-center justify-center text-gray-500 font-bold">\${size}</div>
+                                                <div>
+                                                    <div class="font-medium">\${dims} см</div>
+                                                    <div class="text-xs \${count > 0 ? 'text-green-600' : 'text-red-500'}">\${count > 0 ? \`Свободно: \${count}\` : 'Нет мест'}</div>
+                                                </div>
+                                            </div>
+                                            <div class="text-right">
+                                                <div class="font-bold text-indigo-600 text-lg">\${price} ₽</div>
+                                                <div class="text-xs text-gray-400">за час</div>
+                                            </div>
+                                        </div>
+                                    </label>
+                                \`;
+                            }).join('')}
+                        </div>
+                    </div>
+
+                    <div class="p-4 border-t bg-white">
+                        <button onclick="bookLocker()" class="w-full bg-indigo-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-indigo-700 transition flex justify-between px-6">
+                            <span>Оплатить и открыть</span>
+                            <i class="fas fa-chevron-right mt-1"></i>
+                        </button>
+                    </div>
+                </div>
+            \`;
+        }
+
+        function SuccessView() {
+             const r = state.bookingResult;
+             return \`
+                <div class="flex flex-col h-full bg-indigo-600 text-white p-6 items-center justify-center text-center relative">
+                    <div class="w-20 h-20 bg-white rounded-full flex items-center justify-center text-indigo-600 text-4xl mb-6 shadow-xl animate-bounce">
+                        <i class="fas fa-check"></i>
+                    </div>
+                    <h1 class="text-3xl font-bold mb-2">Ячейка открыта!</h1>
+                    <p class="text-indigo-100 mb-8">Ваши вещи в безопасности</p>
+
+                    <div class="bg-white/10 backdrop-blur rounded-xl p-6 w-full max-w-xs border border-white/20">
+                        <div class="text-indigo-200 text-sm mb-1">Номер ячейки</div>
+                        <div class="text-5xl font-bold mb-6 tracking-tighter">\${r.cellNumber}</div>
+                        
+                        <div class="h-px bg-white/20 w-full mb-6"></div>
+
+                        <div class="text-indigo-200 text-sm mb-1">Код доступа</div>
+                        <div class="text-2xl font-mono font-bold tracking-widest">\${r.accessCode}</div>
+                    </div>
+
+                    <button onclick="navigate('home')" class="mt-12 text-white/80 hover:text-white font-medium">
+                        <i class="fas fa-arrow-left mr-2"></i> Вернуться на главную
+                    </button>
+                </div>
+            \`;
+        }
+
+        // --- Logic ---
+
+        function render() {
+            const app = document.getElementById('app');
+            if (state.view === 'home') {
+                app.innerHTML = HomeView();
+                loadLocations();
+            } else if (state.view === 'booking') {
+                app.innerHTML = BookingView();
+            } else if (state.view === 'success') {
+                app.innerHTML = SuccessView();
+            } else if (state.view === 'admin_login') {
+                app.innerHTML = AdminLoginView();
+            } else if (state.view === 'admin') {
+                app.innerHTML = AdminDashboardView();
+            }
+        }
+
+        function navigate(view, data = null) {
+            state.view = view;
+            if (data) state.activeStation = data;
+            render();
+        }
+
+        async function loadLocations() {
+            try {
+                const res = await fetch('/api/locations');
+                const stations = await res.json();
+                const container = document.getElementById('locations-container');
+                
+                if (stations.length === 0) {
+                    container.innerHTML = '<div class="p-4 text-center text-gray-500">Нет доступных станций</div>';
+                    return;
+                }
+
+                container.innerHTML = stations.map(s => \`
+                    <div onclick="openBooking(\${s.id})" class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex gap-4 cursor-pointer active:scale-95 transition">
+                        <div class="w-20 h-20 bg-gray-100 rounded-lg flex-shrink-0 bg-cover bg-center" style="background-image: url('https://via.placeholder.com/150?text=Locker');"></div>
+                        <div class="flex-1">
+                            <div class="flex justify-between items-start">
+                                <h3 class="font-bold text-gray-800">\${s.name}</h3>
+                                <span class="bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full">Free</span>
+                            </div>
+                            <p class="text-sm text-gray-500 mt-1 mb-2">\${s.address}</p>
+                            <div class="flex gap-2">
+                                <span class="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600">S</span>
+                                <span class="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600">M</span>
+                                <span class="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600">L</span>
+                            </div>
+                        </div>
+                    </div>
+                \`).join('');
+            } catch (e) {
+                console.error(e);
+                document.getElementById('locations-container').innerHTML = '<div class="text-center text-red-500 py-4">Ошибка загрузки</div>';
+            }
+        }
+
+        async function openBooking(id) {
+            navigate('booking', id);
+            const res = await fetch('/api/location/' + id);
+            state.activeStationData = await res.json();
+            render();
+        }
+
+        async function bookLocker() {
+            const sizeInput = document.querySelector('input[name="size"]:checked');
+            if (!sizeInput) {
+                alert('Выберите размер ячейки');
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/book', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        stationId: state.activeStation,
+                        size: sizeInput.value
+                    })
+                });
+                
+                const result = await res.json();
+                if (result.success) {
+                    state.bookingResult = result;
+                    navigate('success');
+                } else {
+                    alert(result.error || 'Ошибка бронирования');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        // --- Admin Logic ---
+        function checkAdmin() {
+            const pass = document.getElementById('adminPass').value;
+            if (pass === '12345') {
+                state.isAdmin = true;
+                navigate('admin');
+            } else {
+                alert('Неверный пароль');
+            }
+        }
+
+        function logoutAdmin() {
+            state.isAdmin = false;
+            navigate('home');
+        }
+
+        async function loadAdminStats() {
+            if (!document.getElementById('statRevenue')) return;
+            const res = await fetch('/api/admin/stats');
+            const data = await res.json();
+            
+            document.getElementById('statRevenue').innerText = data.revenue.toLocaleString() + ' ₽';
+            document.getElementById('statActive').innerText = data.activeBookings;
+            document.getElementById('statStations').innerText = data.totalStations;
+        }
+        
+        async function renderAdminTab(tab) {
+            const content = document.getElementById('adminContent');
+            if (tab === 'dashboard') {
+                 navigate('admin'); // reload
+                 return;
+            }
+            
+            if (tab === 'cells') {
+                const res = await fetch('/api/admin/cells');
+                const cells = await res.json();
+                content.innerHTML = \`
+                    <h2 class="text-2xl font-bold mb-6">Управление ячейками</h2>
+                    <div class="bg-white rounded-lg shadow overflow-hidden">
+                        <table class="w-full">
+                            <thead class="bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                <tr>
+                                    <th class="p-4">Станция</th>
+                                    <th class="p-4">Ячейка</th>
+                                    <th class="p-4">Размер</th>
+                                    <th class="p-4">Статус</th>
+                                    <th class="p-4">Дверь</th>
+                                    <th class="p-4">Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-200">
+                                \${cells.map(c => \`
+                                    <tr>
+                                        <td class="p-4 text-sm text-gray-900">\${c.station_name}</td>
+                                        <td class="p-4 text-sm font-bold">\${c.cell_number}</td>
+                                        <td class="p-4 text-sm"><span class="px-2 py-1 rounded bg-gray-100">\${c.size}</span></td>
+                                        <td class="p-4 text-sm">
+                                            <span class="px-2 py-1 rounded-full text-xs font-medium \${c.status === 'free' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">
+                                                \${c.status}
+                                            </span>
+                                        </td>
+                                        <td class="p-4 text-sm text-gray-500">\${c.door_open ? 'OPEN' : 'Closed'}</td>
+                                        <td class="p-4 text-sm">
+                                            <button onclick="adminForceOpen(\${c.id})" class="text-red-600 hover:text-red-900 font-medium">Открыть принудительно</button>
+                                        </td>
+                                    </tr>
+                                \`).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                \`;
+            }
+
+            if (tab === 'logs') {
+                const res = await fetch('/api/admin/logs');
+                const logs = await res.json();
+                content.innerHTML = \`
+                    <h2 class="text-2xl font-bold mb-6">Журнал событий</h2>
+                    <div class="bg-white rounded-lg shadow overflow-hidden">
+                         <table class="w-full">
+                            <thead class="bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                <tr>
+                                    <th class="p-4">Время</th>
+                                    <th class="p-4">Действие</th>
+                                    <th class="p-4">Детали</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-200">
+                                 \${logs.map(l => \`
+                                    <tr>
+                                        <td class="p-4 text-sm text-gray-500">\${new Date(l.created_at).toLocaleString()}</td>
+                                        <td class="p-4 text-sm font-bold">\${l.action}</td>
+                                        <td class="p-4 text-sm text-gray-700">\${l.details}</td>
+                                    </tr>
+                                 \`).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                \`;
+            }
+        }
+
+        async function adminForceOpen(id) {
+            if(!confirm('Вы уверены, что хотите открыть ячейку?')) return;
+            await fetch('/api/admin/open', {
+                method: 'POST',
+                body: JSON.stringify({ cellId: id })
+            });
+            alert('Команда на открытие отправлена');
+            renderAdminTab('cells');
+        }
+
+        // Initial render
+        render();
+    </script>
+</body>
+</html>
+  `)
+})
+
 export default app
