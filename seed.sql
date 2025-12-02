@@ -137,25 +137,82 @@ INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D06', 'L');
 INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D07', 'L');
 INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D08', 'L');
 
--- STATION 2 CELLS (Minimal)
-INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A01', 'M');
-INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A02', 'L');
+-- STATION 2 CELLS (30 cells)
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A01', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A02', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A03', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A04', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A05', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A06', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A07', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A08', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A09', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A10', 'S');
+
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B01', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B02', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B03', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B04', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B05', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B06', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B07', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B08', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B09', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'B10', 'M');
+
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C01', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C02', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C03', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C04', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C05', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C06', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C07', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C08', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C09', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'C10', 'L');
 
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (1, 'S', 'Маленькая (сумка)', 100);
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (1, 'M', 'Средняя (чемодан)', 200);
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (1, 'L', 'Большая (лыжи)', 300);
-INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (2, 'M', 'Standard', 250);
-INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (2, 'L', 'Large', 450);
+INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (2, 'S', 'Маленькая', 150);
+INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (2, 'M', 'Средняя', 250);
+INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (2, 'L', 'Большая', 450);
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (3, 'S', 'Small', 150);
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (3, 'M', 'Medium', 250);
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (3, 'L', 'Large', 350);
 
--- STATION 3 CELLS
+-- STATION 3 CELLS (30 cells)
 INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A01', 'S');
 INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A02', 'S');
-INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A03', 'M');
-INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A04', 'M');
-INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A05', 'L');
-INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A06', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A03', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A04', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A05', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A06', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A07', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A08', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A09', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'A10', 'S');
+
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B01', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B02', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B03', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B04', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B05', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B06', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B07', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B08', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B09', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'B10', 'M');
+
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C01', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C02', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C03', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C04', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C05', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C06', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C07', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C08', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C09', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (3, 'C10', 'L');
 
 INSERT INTO promo_codes (code, discount_percent) VALUES ('WELCOME', 50);
