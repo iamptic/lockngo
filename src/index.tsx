@@ -218,52 +218,6 @@ app.get('/api/admin/cell/:id/history', async (c) => {
     return c.json(results);
 })
 
-app.get('/api/admin/cell/:id/booking', async (c) => {
-    const id = c.req.param('id');
-    const booking: any = await c.env.DB.prepare("SELECT b.*, u.phone, u.name FROM bookings b JOIN users u ON b.user_id = u.id WHERE b.cell_id = ? AND b.status = 'active'").bind(id).first();
-    return c.json(booking || null);
-})
-
-app.post('/api/admin/booking/finish', async (c) => {
-    const { cellId } = await c.req.json();
-    // 1. Find active booking
-    const booking: any = await c.env.DB.prepare("SELECT * FROM bookings WHERE cell_id = ? AND status = 'active'").bind(cellId).first();
-    if(booking) {
-        await c.env.DB.prepare("UPDATE bookings SET status = 'completed', end_time = CURRENT_TIMESTAMP WHERE id = ?").bind(booking.id).run();
-    }
-    const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
-    
-    // 2. Free the cell
-    await c.env.DB.prepare("UPDATE cells SET status = 'free' WHERE id = ?").bind(cellId).run();
-    
-    // 3. Log
-    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'admin_finish', 'Admin force finished booking for cell ' || ?)").bind(booking?.station_id || (cell?.station_id || 1), cell?.cell_number || cellId).run();
-    
-    return c.json({ success: true });
-})
-
-app.post('/api/admin/book-manual', async (c) => {
-    const { cellId, phone } = await c.req.json();
-    const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
-    if(!cell || cell.status !== 'free') return c.json({error: 'Cell not free'}, 400);
-    
-    // Get or Create User
-    let user: any = await c.env.DB.prepare("SELECT * FROM users WHERE phone = ?").bind(phone).first();
-    if (!user) {
-         await c.env.DB.prepare("INSERT INTO users (phone) VALUES (?)").bind(phone).run();
-         user = await c.env.DB.prepare("SELECT * FROM users WHERE phone = ?").bind(phone).first();
-    }
-
-    const accessCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-    
-    await c.env.DB.prepare("UPDATE cells SET status = 'booked' WHERE id = ?").bind(cellId).run();
-    await c.env.DB.prepare("INSERT INTO bookings (user_id, cell_id, total_amount, status, access_code) VALUES (?, ?, 0, 'active', ?)").bind(user.id, cellId, accessCode).run();
-    
-    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'admin_book', 'Admin manual booking for ' || ? || ' cell ' || ?)").bind(cell.station_id, phone, cell.cell_number).run();
-
-    return c.json({ success: true });
-})
-
 // API: Get user active bookings
 app.get('/api/user/bookings', async (c) => {
     const phone = c.req.query('phone');
@@ -285,6 +239,45 @@ app.get('/api/user/bookings', async (c) => {
     })));
 })
 
+// Get active booking for cell
+app.get('/api/admin/cell/:id/booking', async (c) => {
+    const id = c.req.param('id');
+    const booking: any = await c.env.DB.prepare("SELECT b.*, u.phone, u.name FROM bookings b JOIN users u ON b.user_id = u.id WHERE b.cell_id = ? AND b.status = 'active'").bind(id).first();
+    return c.json(booking || null);
+})
+
+// Force Release (End Rental)
+app.post('/api/admin/cell/release', async (c) => {
+    const { cellId } = await c.req.json();
+    // 1. Close active booking
+    await c.env.DB.prepare("UPDATE bookings SET status = 'completed', end_time = CURRENT_TIMESTAMP WHERE cell_id = ? AND status = 'active'").bind(cellId).run();
+    // 2. Free the cell
+    await c.env.DB.prepare("UPDATE cells SET status = 'free' WHERE id = ?").bind(cellId).run();
+    // 3. Log
+    const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
+    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'force_release', 'Admin forced release of cell ' || ?)").bind(cell.station_id, cell.cell_number).run();
+    
+    return c.json({ success: true });
+})
+
+// Promo Codes CRUD
+app.get('/api/admin/promos', async (c) => {
+    const { results } = await c.env.DB.prepare("SELECT * FROM promo_codes ORDER BY created_at DESC").all();
+    return c.json(results);
+})
+
+app.post('/api/admin/promos', async (c) => {
+    const { code, discount } = await c.req.json();
+    await c.env.DB.prepare("INSERT INTO promo_codes (code, discount_percent) VALUES (?, ?)").bind(code, discount).run();
+    return c.json({ success: true });
+})
+
+app.delete('/api/admin/promos/:id', async (c) => {
+    const id = c.req.param('id');
+    await c.env.DB.prepare("UPDATE promo_codes SET is_active = 0 WHERE id = ?").bind(id).run();
+    return c.json({ success: true });
+})
+
 app.post('/api/admin/cell/open', async (c) => {
     const { cellId } = await c.req.json();
     const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
@@ -292,6 +285,17 @@ app.post('/api/admin/cell/open', async (c) => {
     
     await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE id = ?").bind(cellId).run();
     await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'remote_open', 'Remote open cell ' || ? || ' (ID: ' || ? || ')')").bind(cell.station_id, cell.cell_number, cellId).run();
+    
+    return c.json({ success: true });
+})
+
+app.post('/api/admin/cell/close', async (c) => {
+    const { cellId } = await c.req.json();
+    const cell: any = await c.env.DB.prepare("SELECT * FROM cells WHERE id = ?").bind(cellId).first();
+    if(!cell) return c.json({error: 'Cell not found'}, 404);
+    
+    await c.env.DB.prepare("UPDATE cells SET door_open = 0 WHERE id = ?").bind(cellId).run();
+    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'remote_close', 'Remote close (reset) cell ' || ? || ' (ID: ' || ? || ')')").bind(cell.station_id, cell.cell_number, cellId).run();
     
     return c.json({ success: true });
 })
@@ -309,7 +313,7 @@ app.post('/api/admin/cell/status', async (c) => {
 
 // --- FRONTEND HTML ---
 const adminHtml = `<!DOCTYPE html>
-<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Lock&Go Admin Pro</title><script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.3.4/vue.global.min.js"></script><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><style>body { font-family: 'Inter', sans-serif; background: #F3F4F6; } [v-cloak] { display: none !important; } .sidebar-link.active { background: #4F46E5; color: white; } .sidebar-link:hover:not(.active) { background: #E5E7EB; } #map-admin { height: 600px; width: 100%; border-radius: 12px; } .cell-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 12px; } .cell-box { aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 12px; font-weight: bold; cursor: pointer; transition: all 0.2s; border: 2px solid transparent; } .cell-box:hover { transform: scale(1.05); z-index: 10; shadow: lg; } .cell-free { background: #DCFCE7; color: #166534; border-color: #BBF7D0; } .cell-booked { background: #FEE2E2; color: #991B1B; border-color: #FECACA; } .cell-maintenance { background: #F3F4F6; color: #6B7280; border-color: #E5E7EB; } .cell-selected { border-color: #4F46E5; ring: 2px; ring-color: #4F46E5; }</style></head><body><div id="app" v-cloak class="h-screen flex overflow-hidden">
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Lock&Go Admin Pro</title><script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.3.4/vue.global.min.js"></script><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>body { font-family: 'Inter', sans-serif; background: #F3F4F6; } [v-cloak] { display: none !important; } .sidebar-link.active { background: #4F46E5; color: white; } .sidebar-link:hover:not(.active) { background: #E5E7EB; } #map-admin { height: 600px; width: 100%; border-radius: 12px; } .cell-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 12px; } .cell-box { aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 12px; font-weight: bold; cursor: pointer; transition: all 0.2s; border: 2px solid transparent; } .cell-box:hover { transform: scale(1.05); z-index: 10; shadow: lg; } .cell-free { background: #DCFCE7; color: #166534; border-color: #BBF7D0; } .cell-booked { background: #FEE2E2; color: #991B1B; border-color: #FECACA; } .cell-maintenance { background: #F3F4F6; color: #6B7280; border-color: #E5E7EB; } .cell-selected { border-color: #4F46E5; ring: 2px; ring-color: #4F46E5; }</style></head><body><div id="app" v-cloak class="h-screen flex overflow-hidden">
 <!-- LOGIN -->
 <div v-if="!auth" class="fixed inset-0 bg-gray-900 flex items-center justify-center z-[100]"><div class="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md mx-4"><div class="flex justify-center mb-6 text-indigo-600 text-5xl"><i class="fas fa-cube"></i></div><h2 class="text-2xl font-bold text-center mb-6 text-gray-800">Lock&Go Admin</h2><input v-model="loginPass" type="password" placeholder="Password (12345)" class="w-full p-4 border border-gray-300 rounded-xl mb-4 focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none text-lg" @keyup.enter="doLogin"><button @click="doLogin" class="w-full bg-indigo-600 text-white font-bold py-4 rounded-xl hover:bg-indigo-700 transition text-lg shadow-lg shadow-indigo-200">Войти в систему</button></div></div>
 <!-- SIDEBAR -->
@@ -317,7 +321,7 @@ const adminHtml = `<!DOCTYPE html>
 <!-- MAIN -->
 <main v-if="auth" class="flex-1 flex flex-col overflow-hidden relative"><header class="bg-white h-16 border-b border-gray-200 flex items-center justify-between px-4 md:hidden shrink-0"><div class="font-bold text-indigo-600"><i class="fas fa-cube"></i> Lock&Go</div><button @click="showMobileMenu = !showMobileMenu"><i class="fas fa-bars text-gray-600 text-xl"></i></button></header><div class="flex-1 overflow-y-auto p-6">
 <!-- DASHBOARD -->
-<div v-if="page === 'dashboard'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Обзор системы</h1><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8"><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Выручка</div><div class="text-3xl font-black text-gray-900">{{ stats.revenue }} ₽</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Активные</div><div class="text-3xl font-black text-indigo-600">{{ stats.active_rentals }}</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Инциденты</div><div class="text-3xl font-black" :class="stats.incidents>0?'text-red-600':'text-gray-900'">{{ stats.incidents }}</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Сегодня</div><div class="text-3xl font-black text-gray-900">{{ stats.bookings_today }}</div></div></div></div>
+<div v-if="page === 'dashboard'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Обзор системы</h1><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8"><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Выручка</div><div class="text-3xl font-black text-gray-900">{{ stats.revenue }} ₽</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Активные</div><div class="text-3xl font-black text-indigo-600">{{ stats.active_rentals }}</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Инциденты</div><div class="text-3xl font-black" :class="stats.incidents>0?'text-red-600':'text-gray-900'">{{ stats.incidents }}</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Сегодня</div><div class="text-3xl font-black text-gray-900">{{ stats.bookings_today }}</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 col-span-full"><h3 class="font-bold text-lg mb-4">Динамика выручки</h3><div class="h-64"><canvas id="revenueChart"></canvas></div></div></div></div>
 <!-- MAP -->
 <div v-show="page === 'map'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Карта сети</h1><div id="map-admin" class="shadow-sm border border-gray-200"></div></div>
 <!-- STATIONS LIST -->
@@ -336,6 +340,31 @@ const adminHtml = `<!DOCTYPE html>
 <div v-if="page === 'logs'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Журнал событий</h1><div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"><table class="w-full text-sm text-left"><thead class="text-xs text-gray-400 uppercase bg-gray-50 border-b"><tr><th class="px-6 py-4">Время</th><th class="px-6 py-4">Станция</th><th class="px-6 py-4">Действие</th><th class="px-6 py-4">Детали</th></tr></thead><tbody><tr v-for="l in logs" :key="l.id" class="border-b hover:bg-gray-50"><td class="px-6 py-4 font-mono text-xs text-gray-500">{{ new Date(l.created_at).toLocaleString() }}</td><td class="px-6 py-4 font-bold">{{ l.station_name || '-' }}</td><td class="px-6 py-4"><span class="px-2 py-1 rounded bg-gray-100 text-xs font-bold uppercase">{{ l.action }}</span></td><td class="px-6 py-4 text-gray-600">{{ l.details }}</td></tr></tbody></table></div></div>
 <!-- USERS -->
 <div v-if="page === 'users'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Персонал и Клиенты</h1><div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"><table class="w-full text-sm text-left"><thead class="text-xs text-gray-400 uppercase bg-gray-50 border-b"><tr><th class="px-6 py-4">Телефон</th><th class="px-6 py-4">Имя</th><th class="px-6 py-4">Роль</th><th class="px-6 py-4">LTV</th></tr></thead><tbody><tr v-for="u in users" :key="u.id" class="border-b"><td class="px-6 py-4 font-bold">{{u.phone}}</td><td class="px-6 py-4">{{u.name||'-'}}</td><td class="px-6 py-4"><select v-model="u.role" @change="updateRole(u)" class="p-1 bg-gray-50 border rounded text-xs font-bold uppercase" :class="{'text-indigo-600': u.role==='admin', 'text-green-600': u.role==='support'}"><option value="user">User</option><option value="support">Support</option><option value="admin">Admin</option></select></td><td class="px-6 py-4">{{u.ltv}} ₽</td></tr></tbody></table></div></div>
+<!-- PROMO CODES -->
+<div v-if="page === 'promos'">
+    <h1 class="text-2xl font-bold text-gray-900 mb-6">Промокоды</h1>
+    <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-6">
+        <div class="flex gap-4">
+            <input v-model="newPromo.code" placeholder="Код (например, SUMMER24)" class="flex-1 p-2 border rounded-lg uppercase font-bold">
+            <input v-model="newPromo.discount" type="number" placeholder="Скидка %" class="w-24 p-2 border rounded-lg">
+            <button @click="createPromo" class="bg-indigo-600 text-white px-6 rounded-lg font-bold hover:bg-indigo-700">Создать</button>
+        </div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+        <table class="w-full text-sm text-left">
+            <thead class="text-xs text-gray-400 uppercase bg-gray-50 border-b"><tr><th class="px-6 py-4">Код</th><th class="px-6 py-4">Скидка</th><th class="px-6 py-4">Использовано</th><th class="px-6 py-4">Статус</th><th class="px-6 py-4"></th></tr></thead>
+            <tbody>
+                <tr v-for="p in promos" :key="p.id" class="border-b">
+                    <td class="px-6 py-4 font-bold">{{ p.code }}</td>
+                    <td class="px-6 py-4">{{ p.discount_percent }}%</td>
+                    <td class="px-6 py-4">{{ p.usage_count }}</td>
+                    <td class="px-6 py-4"><span class="px-2 py-1 rounded text-xs font-bold" :class="p.is_active ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'">{{ p.is_active ? 'Active' : 'Inactive' }}</span></td>
+                    <td class="px-6 py-4 text-right"><button v-if="p.is_active" @click="deletePromo(p.id)" class="text-red-500 hover:text-red-700"><i class="fas fa-trash"></i></button></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
 </div></main></div>
 <!-- CELL MODAL -->
 <div id="cell-modal" style="display: none;" :style="{ display: selectedCell ? 'flex' : 'none' }" class="fixed inset-0 bg-black/50 z-[60] items-center justify-center" @click.self="selectedCell=null">
@@ -345,26 +374,20 @@ const adminHtml = `<!DOCTYPE html>
             <div class="bg-gray-50 p-3 rounded-lg"><div class="text-xs text-gray-500 uppercase">Размер</div><div class="font-bold text-lg">{{ selectedCell.size }}</div></div>
             <div class="bg-gray-50 p-3 rounded-lg"><div class="text-xs text-gray-500 uppercase">Статус</div><div class="font-bold text-lg capitalize" :class="{'text-green-600': selectedCell.status==='free', 'text-red-600': selectedCell.status==='booked'}">{{ selectedCell.status }}</div></div>
         </div>
-
-        <!-- BOOKING INFO (If Booked) -->
-        <div v-if="selectedCell.status === 'booked' && activeBooking" class="bg-indigo-50 p-4 rounded-xl mb-4 border border-indigo-100">
-            <div class="text-xs font-bold text-indigo-400 uppercase mb-2">Информация об аренде</div>
-            <div class="flex justify-between mb-1"><span class="text-gray-500 text-sm">Клиент:</span><span class="font-bold">{{ activeBooking.phone }}</span></div>
-            <div class="flex justify-between mb-3"><span class="text-gray-500 text-sm">Начало:</span><span class="font-bold">{{ new Date(activeBooking.start_time).toLocaleTimeString() }}</span></div>
-            <button @click="forceFinish(selectedCell.id)" class="w-full bg-red-100 text-red-600 font-bold py-2 rounded-lg hover:bg-red-200 text-xs uppercase">Завершить аренду</button>
-        </div>
-
-        <!-- MANUAL BOOKING (If Free) -->
-        <div v-if="selectedCell.status === 'free'" class="bg-gray-50 p-4 rounded-xl mb-4 border border-gray-200">
-             <div class="text-xs font-bold text-gray-400 uppercase mb-2">Ручное бронирование</div>
-             <input v-model="manualPhone" placeholder="+7 (999) ..." class="w-full p-2 border rounded-lg mb-2 text-sm">
-             <button @click="manualBook(selectedCell.id)" class="w-full bg-gray-800 text-white font-bold py-2 rounded-lg hover:bg-gray-900 text-xs uppercase">Забронировать</button>
-        </div>
-
-        <button @click="remoteOpen(selectedCell.id)" class="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl mb-3 hover:bg-indigo-700"><i class="fas fa-lock-open mr-2"></i> Открыть удаленно</button>
+        <div class="grid grid-cols-2 gap-3 mb-3"><button @click="remoteOpen(selectedCell.id)" class="bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 flex items-center justify-center shadow-lg shadow-indigo-200"><i class="fas fa-lock-open mr-2"></i> Открыть</button><button @click="remoteClose(selectedCell.id)" class="bg-gray-800 text-white font-bold py-3 rounded-xl hover:bg-gray-900 flex items-center justify-center shadow-lg shadow-gray-200"><i class="fas fa-lock mr-2"></i> Закрыть</button></div>
         
+        <!-- Force Release Button for Booked Cells -->
+        <div v-if="selectedCell.status === 'booked'" class="mb-3">
+            <div v-if="activeBooking" class="bg-indigo-50 p-3 rounded-lg mb-2 text-xs">
+                <div class="font-bold text-indigo-900">Арендатор:</div>
+                <div>{{ activeBooking.phone }} ({{ activeBooking.name || 'Без имени' }})</div>
+                <div class="text-gray-500">{{ new Date(activeBooking.start_time).toLocaleString() }}</div>
+            </div>
+            <button @click="forceRelease(selectedCell.id)" class="w-full bg-red-100 text-red-600 font-bold py-3 rounded-xl hover:bg-red-200 border border-red-200"><i class="fas fa-stop-circle mr-2"></i> Завершить аренду</button>
+        </div>
+
         <div class="flex gap-2 mb-3">
-            <button v-if="selectedCell.status !== 'maintenance'" @click="changeStatus(selectedCell.id, 'maintenance')" class="flex-1 bg-gray-100 text-gray-600 font-bold py-2 rounded-lg hover:bg-gray-200 text-xs uppercase">Заблокировать</button>
+            <button v-if="selectedCell.status !== 'maintenance' && selectedCell.status !== 'booked'" @click="changeStatus(selectedCell.id, 'maintenance')" class="flex-1 bg-gray-100 text-gray-600 font-bold py-2 rounded-lg hover:bg-gray-200 text-xs uppercase">Заблокировать</button>
             <button v-if="selectedCell.status === 'maintenance'" @click="changeStatus(selectedCell.id, 'free')" class="flex-1 bg-green-100 text-green-600 font-bold py-2 rounded-lg hover:bg-green-200 text-xs uppercase">Разблокировать</button>
         </div>
 
@@ -381,60 +404,47 @@ const adminHtml = `<!DOCTYPE html>
         </div>
     </div>
 </div>
-<script>const {createApp,ref,onMounted,watch,nextTick}=Vue;createApp({setup(){const auth=ref(false);const loginPass=ref('');const page=ref('dashboard');const stats=ref({});const stations=ref([]);const users=ref([]);const logs=ref([]);const activeStation=ref(null);const selectedCell=ref(null);const cellHistory=ref([]);const activeBooking=ref(null);const manualPhone=ref('');const map=ref(null);const menu=[{id:'dashboard',label:'Главная',icon:'fas fa-home'},{id:'map',label:'Карта',icon:'fas fa-map'},{id:'devices',label:'Устройства',icon:'fas fa-server'},{id:'users',label:'Персонал',icon:'fas fa-users'},{id:'logs',label:'Логи',icon:'fas fa-list-ul'}];
+<script>const {createApp,ref,onMounted,watch,nextTick}=Vue;createApp({setup(){const auth=ref(false);const loginPass=ref('');const page=ref('dashboard');const stats=ref({});const stations=ref([]);const users=ref([]);const logs=ref([]);const promos=ref([]);const newPromo=ref({code:'', discount: ''});const activeStation=ref(null);const selectedCell=ref(null);const chartInstance=ref(null);const activeBooking=ref(null);const cellHistory=ref([]);const map=ref(null);const menu=[{id:'dashboard',label:'Главная',icon:'fas fa-home'},{id:'map',label:'Карта',icon:'fas fa-map'},{id:'devices',label:'Устройства',icon:'fas fa-server'},{id:'users',label:'Персонал',icon:'fas fa-users'},{id:'promos',label:'Промокоды',icon:'fas fa-tag'},{id:'logs',label:'Логи',icon:'fas fa-list-ul'}];
 const doLogin=()=>{if(loginPass.value==='12345'){auth.value=true;fetchData();}};
-const fetchData=async()=>{try{const [s,st,u,l]=await Promise.all([fetch('/api/admin/dashboard'),fetch('/api/admin/stations'),fetch('/api/admin/users'),fetch('/api/admin/logs')]);if(s.ok)stats.value=await s.json();if(st.ok){stations.value=await st.json();updateMap();}if(u.ok)users.value=await u.json();if(l.ok)logs.value=await l.json();}catch(e){console.error('Fetch error',e)}};
-const setPage=(p)=>{page.value=p;if(p==='map'){nextTick(()=>initMap())}else if(p==='logs'){fetchData()}};
+const fetchData=async()=>{try{const [s,st,u,l,p]=await Promise.all([fetch('/api/admin/dashboard'),fetch('/api/admin/stations'),fetch('/api/admin/users'),fetch('/api/admin/logs'),fetch('/api/admin/promos')]);if(s.ok){stats.value=await s.json();if(page.value==='dashboard')nextTick(initChart);}if(st.ok){stations.value=await st.json();updateMap();}if(u.ok)users.value=await u.json();if(l.ok)logs.value=await l.json();if(p.ok)promos.value=await p.json();}catch(e){console.error('Fetch error',e)}};
+const setPage=(p)=>{page.value=p;if(p==='map'){nextTick(()=>initMap())}else if(p==='dashboard'){nextTick(()=>initChart())}else if(p==='logs' || p==='promos'){fetchData()}};
 const initMap=()=>{if(map.value)return;const el=document.getElementById('map-admin');if(!el)return;map.value=L.map('map-admin').setView([59.9343, 30.3351], 11);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map.value);updateMap();};
-const updateMap=()=>{if(!map.value || !stations.value.length)return;stations.value.forEach(s=>{if(s.lat && s.lng){L.marker([s.lat, s.lng]).addTo(map.value).bindPopup('<b>'+s.name+'</b><br>'+s.address).on('click', ()=>openStationDetail(s.id))}})};
+const initChart=()=>{const ctx=document.getElementById('revenueChart');if(!ctx)return;if(chartInstance.value)chartInstance.value.destroy();chartInstance.value=new Chart(ctx,{type:'bar',data:{labels:['Пн','Вт','Ср','Чт','Пт','Сб','Вс'],datasets:[{label:'Выручка',data:[500,1200,750,900,1500,2000,stats.value.revenue||0],backgroundColor:'#4F46E5',borderRadius:8}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,grid:{display:false}}}}})};const updateMap=()=>{if(!map.value || !stations.value.length)return;stations.value.forEach(s=>{if(s.lat && s.lng){L.marker([s.lat, s.lng]).addTo(map.value).bindPopup('<b>'+s.name+'</b><br>'+s.address).on('click', ()=>openStationDetail(s.id))}})};
 const openStationDetail=async(id)=>{const res=await fetch('/api/admin/station/'+id+'/details');if(res.ok){activeStation.value=await res.json();page.value='station_detail'}};
 const selectCell=async(cell)=>{
     selectedCell.value=cell;
     cellHistory.value=[];
     activeBooking.value=null;
-    manualPhone.value='';
-    
-    const res = await fetch('/api/admin/cell/'+cell.id+'/history');
-    if(res.ok) cellHistory.value = await res.json();
-    
-    if(cell.status === 'booked') {
-        const bRes = await fetch('/api/admin/cell/'+cell.id+'/booking');
-        if(bRes.ok) activeBooking.value = await bRes.json();
-    }
+    const [hRes, bRes] = await Promise.all([
+        fetch('/api/admin/cell/'+cell.id+'/history'),
+        cell.status === 'booked' ? fetch('/api/admin/cell/'+cell.id+'/booking') : Promise.resolve({ok:false})
+    ]);
+    if(hRes.ok) cellHistory.value = await hRes.json();
+    if(bRes.ok) activeBooking.value = await bRes.json();
 };
 const changeStatus=async(id, status)=>{
     if(!confirm('Изменить статус ячейки на '+status+'?')) return;
     await fetch('/api/admin/cell/status',{method:'POST',body:JSON.stringify({cellId:id, status})});
     alert('Статус изменен');
-    selectedCell.value.status = status; // Optimistic update
+    selectedCell.value.status = status; 
     openStationDetail(activeStation.value.station.id);
 };
-const forceFinish=async(id)=>{
-    if(!confirm('Принудительно завершить аренду? Ячейка станет свободной.')) return;
-    await fetch('/api/admin/booking/finish',{method:'POST',body:JSON.stringify({cellId:id})});
-    alert('Аренда завершена');
+const forceRelease=async(id)=>{
+    if(!confirm('Принудительно завершить аренду и освободить ячейку?')) return;
+    await fetch('/api/admin/cell/release',{method:'POST',body:JSON.stringify({cellId:id})});
+    alert('Ячейка освобождена');
     selectedCell.value.status = 'free';
     activeBooking.value = null;
     openStationDetail(activeStation.value.station.id);
 };
-const manualBook=async(id)=>{
-    if(!manualPhone.value) return alert('Введите номер телефона');
-    const res = await fetch('/api/admin/book-manual',{method:'POST',body:JSON.stringify({cellId:id, phone:manualPhone.value})});
-    if(res.ok) {
-        alert('Ячейка забронирована');
-        selectedCell.value.status = 'booked';
-        selectCell(selectedCell.value); // Reload details
-        openStationDetail(activeStation.value.station.id);
-    } else {
-        alert('Ошибка бронирования');
-    }
-};
-const remoteOpen=async(id)=>{if(!confirm('Открыть ячейку удаленно? Это действие будет записано в лог.'))return;await fetch('/api/admin/cell/open',{method:'POST',body:JSON.stringify({cellId:id})});alert('Команда отправлена');selectedCell.value=null;openStationDetail(activeStation.value.station.id);};
+const createPromo=async()=>{if(!newPromo.value.code || !newPromo.value.discount)return;await fetch('/api/admin/promos',{method:'POST',body:JSON.stringify(newPromo.value)});newPromo.value={code:'',discount:''};fetchData();alert('Промокод создан')};
+const deletePromo=async(id)=>{if(!confirm('Удалить?'))return;await fetch('/api/admin/promos/'+id,{method:'DELETE'});fetchData();};
+const remoteClose=async(id)=>{if(!confirm('Принудительно закрыть (сбросить флаг)?'))return;await fetch('/api/admin/cell/close',{method:'POST',body:JSON.stringify({cellId:id})});alert('Команда сброса отправлена');selectedCell.value=null;openStationDetail(activeStation.value.station.id);};const remoteOpen=async(id)=>{if(!confirm('Открыть ячейку удаленно? Это действие будет записано в лог.'))return;await fetch('/api/admin/cell/open',{method:'POST',body:JSON.stringify({cellId:id})});alert('Команда отправлена');selectedCell.value=null;openStationDetail(activeStation.value.station.id);};
 const openAllCells=async(sid)=>{const code=prompt('ВВЕДИТЕ "CONFIRM" ЧТОБЫ ОТКРЫТЬ ВСЕ ЯЧЕЙКИ. ЭТО ЭКСТРЕННОЕ ДЕЙСТВИЕ!');if(code!=='CONFIRM')return;await fetch('/api/admin/station/'+sid+'/open-all',{method:'POST'});alert('Команда массового открытия отправлена!');openStationDetail(sid)};
 const updateTariff=async(t)=>{await fetch('/api/admin/tariffs',{method:'POST',body:JSON.stringify({id:t.id,price:t.price_initial})});};
 const updateRole=async(u)=>{await fetch('/api/admin/users/role',{method:'POST',body:JSON.stringify({userId:u.id,role:u.role})});alert('Роль обновлена')};
 const updateScreen=async(s)=>{await fetch('/api/admin/station/'+s.id+'/screen',{method:'POST',body:JSON.stringify({content:s.screen_content,mode:s.screen_mode})});alert('Экран обновлен')};
-setInterval(()=>{if(auth.value && page.value==='dashboard')fetchData()},5000);return{auth,loginPass,doLogin,page,menu,stats,stations,users,logs,activeStation,selectedCell,cellHistory,activeBooking,manualPhone,setPage,openStationDetail,selectCell,remoteOpen,openAllCells,updateTariff,updateRole,updateScreen,changeStatus,forceFinish,manualBook}}}).mount('#app');</script></body></html>`
+setInterval(()=>{if(auth.value && page.value==='dashboard')fetchData()},5000);return{auth,loginPass,doLogin,page,menu,stats,stations,users,logs,promos,newPromo,activeStation,selectedCell,activeBooking,cellHistory,setPage,openStationDetail,selectCell,remoteOpen,openAllCells,updateTariff,updateRole,updateScreen,changeStatus,forceRelease,createPromo,deletePromo}}}).mount('#app');</script></body></html>`
 
 
 const userHtml = `<!DOCTYPE html>
