@@ -2,7 +2,7 @@
   "name": "webapp",
   "type": "module",
   "scripts": {
-    "dev": "wrangler pages dev dist --d1=webapp-production --local --ip 0.0.0.0 --port 3000",
+    "dev": "wrangler pages dev dist --d1=webapp-production --local --ip 0.0.0.0 --port 3001",
     "build": "vite build",
     "preview": "wrangler pages dev dist",
     "deploy": "npm run build && wrangler pages deploy dist",
