@@ -142,9 +142,8 @@ app.get('*', (c) => {
         }
         @keyframes scan { 0% {top: 0;} 50% {top: 100%;} 100% {top: 0;} }
         
-        /* Modal Transition */
-        .modal-enter { opacity: 0; transform: scale(0.9); }
-        .modal-enter-active { opacity: 1; transform: scale(1); transition: all 0.2s; }
+        /* Active Menu Item */
+        .admin-nav-item.active { background-color: #4338ca !important; color: white !important; }
     </style>
 </head>
 <body class="bg-gray-50 h-screen flex flex-col overflow-hidden text-gray-900">
@@ -207,7 +206,6 @@ app.get('*', (c) => {
         const ScannerView = () => \`
             <div class="flex flex-col h-full bg-black text-white relative">
                 <button onclick="navigate('home')" class="absolute top-4 right-4 z-20 w-10 h-10 bg-black/50 rounded-full flex items-center justify-center text-white"><i class="fas fa-times"></i></button>
-                
                 <div class="flex-1 flex flex-col items-center justify-center relative">
                     <div class="w-64 h-64 border-2 border-white/50 rounded-3xl relative scan-region">
                         <div class="absolute top-0 left-0 w-6 h-6 border-l-4 border-t-4 border-indigo-500 rounded-tl-lg -ml-1 -mt-1"></div>
@@ -216,12 +214,8 @@ app.get('*', (c) => {
                         <div class="absolute bottom-0 right-0 w-6 h-6 border-r-4 border-b-4 border-indigo-500 rounded-br-lg -mr-1 -mb-1"></div>
                         <div class="scan-line"></div>
                     </div>
-                    <div class="mt-8 text-center">
-                        <p class="font-bold text-lg mb-1">Наведите камеру</p>
-                        <p class="text-gray-400 text-sm">на QR-код на ячейке</p>
-                    </div>
+                    <div class="mt-8 text-center"><p class="font-bold text-lg mb-1">Наведите камеру</p><p class="text-gray-400 text-sm">на QR-код на ячейке</p></div>
                 </div>
-                <div class="p-6 pb-10 text-center text-xs text-gray-500">Симуляция сканирования...</div>
             </div>
         \`;
 
@@ -248,7 +242,6 @@ app.get('*', (c) => {
             </div>
         \`;
 
-        // Success, Admin views... (same as before, abbreviated for brevity but kept in logic)
         const SuccessView = (data) => \`<div class="flex flex-col h-full brand-gradient text-white p-8 items-center justify-center text-center"><div class="w-24 h-24 bg-white/20 backdrop-blur rounded-full flex items-center justify-center text-4xl mb-8"><i class="fas fa-unlock-alt"></i></div><h1 class="text-3xl font-bold mb-2">Открыто!</h1><div class="bg-white text-gray-900 rounded-2xl p-6 w-full shadow-2xl mb-4"><div class="text-6xl font-black text-indigo-600">\${data.cellNumber}</div><div class="text-gray-400 text-xs uppercase font-bold">Код: \${data.accessCode}</div></div><button onclick="navigate('home')" class="mt-auto w-full py-4 text-white/70">На главную</button></div>\`;
 
         const AdminView = () => \`
@@ -256,12 +249,14 @@ app.get('*', (c) => {
                 <div class="w-64 bg-gray-900 text-gray-400 hidden md:flex flex-col">
                     <div class="p-6 text-white font-bold text-xl tracking-wider border-b border-gray-800">LOCK&GO <span class="text-xs text-indigo-500 block">ADMIN</span></div>
                     <nav class="flex-1 p-4 space-y-1">
-                        <a href="#" onclick="renderAdminTab('dash')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-chart-pie"></i> Дашборд</a>
-                        <a href="#" onclick="renderAdminTab('map')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition text-white bg-gray-800/50"><i class="fas fa-map text-green-500"></i> Карта сети</a>
-                        <a href="#" onclick="renderAdminTab('clients')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-users text-blue-400"></i> CRM</a>
-                        <a href="#" onclick="renderAdminTab('monitoring')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-heartbeat text-red-500"></i> Мониторинг</a>
-                        <a href="#" onclick="renderAdminTab('cells')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-th-large"></i> Ячейки</a>
-                        <a href="#" onclick="renderAdminTab('tariffs')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-tag"></i> Тарифы</a>
+                        <a href="#" onclick="renderAdminTab('dash')" id="nav-dash" class="admin-nav-item flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-chart-pie"></i> Дашборд</a>
+                        <a href="#" onclick="renderAdminTab('map')" id="nav-map" class="admin-nav-item flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-map"></i> Карта сети</a>
+                        <a href="#" onclick="renderAdminTab('clients')" id="nav-clients" class="admin-nav-item flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-users"></i> CRM</a>
+                        <a href="#" onclick="renderAdminTab('monitoring')" id="nav-monitoring" class="admin-nav-item flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-heartbeat"></i> Мониторинг</a>
+                        <a href="#" onclick="renderAdminTab('cells')" id="nav-cells" class="admin-nav-item flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-th-large"></i> Ячейки</a>
+                        <a href="#" onclick="renderAdminTab('tariffs')" id="nav-tariffs" class="admin-nav-item flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-tag"></i> Тарифы</a>
+                        <a href="#" onclick="renderAdminTab('promos')" id="nav-promos" class="admin-nav-item flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-gift"></i> Промокоды</a>
+                        <a href="#" onclick="renderAdminTab('logs')" id="nav-logs" class="admin-nav-item flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-list"></i> Логи</a>
                     </nav>
                     <div class="p-4 border-t border-gray-800"><button onclick="navigate('home')" class="text-sm hover:text-white">Выход</button></div>
                 </div>
@@ -289,21 +284,12 @@ app.get('*', (c) => {
             if(show) { modal.classList.remove('hidden'); modal.classList.add('flex'); }
             else { modal.classList.add('hidden'); modal.classList.remove('flex'); }
         }
-
         function startScanner() {
             navigate('scanner');
-            // Simulate scanning delay
             setTimeout(async () => {
-                // Fake detection of first station
-                const res = await fetch('/api/locations');
-                const stations = await res.json();
-                if(stations.length > 0) {
-                    navigator.vibrate?.(200); // Vibrate phone if supported
-                    navigate('booking', stations[0]);
-                } else {
-                    alert('QR код не распознан');
-                    navigate('home');
-                }
+                const res = await fetch('/api/locations'); const stations = await res.json();
+                if(stations.length > 0) { navigator.vibrate?.(200); navigate('booking', stations[0]); }
+                else { alert('QR код не распознан'); navigate('home'); }
             }, 2500);
         }
 
@@ -311,7 +297,7 @@ app.get('*', (c) => {
             const res = await fetch('/api/locations'); const data = await res.json();
             document.getElementById('stations-list').innerHTML = data.map(s => \`<div onclick='navigate("booking", \${JSON.stringify(s)})' class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex gap-4 cursor-pointer active:scale-[0.98] transition"><div class="w-16 h-16 bg-indigo-50 rounded-lg flex items-center justify-center text-indigo-600 text-2xl"><i class="fas fa-box"></i></div><div class="flex-1"><h3 class="font-bold text-gray-900">\${s.name}</h3><p class="text-xs text-gray-500">\${s.address}</p></div></div>\`).join('');
         }
-        // ... (rest of logic same as before)
+        // ... (checkPromo, updateTotal, processBooking - same as before)
         async function loadTariffs(stationId) {
             const res = await fetch('/api/location/' + stationId); const { tariffs } = await res.json(); state.currentTariffs = tariffs;
             document.getElementById('tariffs-list').innerHTML = tariffs.map(t => \`<label class="block relative group"><input type="radio" name="tariff" value="\${t.size}" class="peer sr-only" onchange="updateTotal()"><div class="p-4 rounded-xl border-2 border-gray-100 peer-checked:border-indigo-600 peer-checked:bg-indigo-50 transition flex justify-between items-center"><div class="flex items-center gap-3"><div class="w-10 h-10 rounded bg-white border border-gray-200 flex items-center justify-center font-bold text-gray-700">\${t.size}</div><div class="text-sm font-bold text-gray-900">\${t.description}</div></div><div class="font-bold">\${t.price_initial} ₽</div></div></label>\`).join('');
@@ -339,9 +325,15 @@ app.get('*', (c) => {
             const result = await res.json(); if(result.success) navigate('success', result); else alert(result.error);
         }
 
-        // Admin Tabs Logic (Abbreviated to save space, functionality identical)
+        // --- UPDATED ADMIN LOGIC ---
         async function renderAdminTab(tab) {
             const content = document.getElementById('admin-content');
+            
+            // Active State Logic
+            document.querySelectorAll('.admin-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById('nav-'+tab)?.classList.add('active');
+
+            // Content Logic
             if (tab === 'dash') {
                 const res = await fetch('/api/admin/dashboard'); const s = await res.json();
                 content.innerHTML = \`<div class="grid grid-cols-4 gap-4"><div class="bg-white p-4 rounded shadow border-l-4 border-indigo-500"><div class="text-xs text-gray-400">LTV</div><div class="text-2xl font-bold">\${s.revenue} ₽</div></div></div>\`;
@@ -349,15 +341,8 @@ app.get('*', (c) => {
                 content.innerHTML = \`<div class="h-[600px] w-full bg-gray-200 rounded-xl overflow-hidden shadow-lg" id="map-container"></div>\`;
                 const res = await fetch('/api/admin/monitoring'); const data = await res.json();
                 setTimeout(() => {
-                    const map = L.map('map-container').setView([59.9343, 30.3351], 11);
-                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-                    data.forEach(s => {
-                        if(s.lat && s.lng) {
-                           const color = (s.error_msg || !s.last_heartbeat) ? 'red' : 'green';
-                           const icon = L.divIcon({ className: 'custom-div-icon', html: \`<div style='background-color:\${color}; width:15px; height:15px; border-radius:50%; border:2px solid white;'></div>\`, iconSize: [15, 15] });
-                           L.marker([s.lat, s.lng], {icon: icon}).addTo(map).bindPopup(\`<b>\${s.name}</b><br>\${s.address}\`);
-                        }
-                    });
+                    const map = L.map('map-container').setView([59.9343, 30.3351], 11); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                    data.forEach(s => { if(s.lat && s.lng) { const color = (s.error_msg || !s.last_heartbeat) ? 'red' : 'green'; const icon = L.divIcon({ className: 'custom-div-icon', html: \`<div style='background-color:\${color}; width:15px; height:15px; border-radius:50%; border:2px solid white;'></div>\`, iconSize: [15, 15] }); L.marker([s.lat, s.lng], {icon: icon}).addTo(map).bindPopup(\`<b>\${s.name}</b><br>\${s.address}\`); } });
                 }, 100);
             } else if (tab === 'clients') {
                  const res = await fetch('/api/admin/users'); const users = await res.json();
@@ -365,19 +350,29 @@ app.get('*', (c) => {
             } else if (tab === 'monitoring') {
                  const res = await fetch('/api/admin/monitoring'); const data = await res.json();
                  content.innerHTML = \`<div class="grid grid-cols-3 gap-4">\${data.map(s => \`<div class="bg-white p-4 rounded shadow \${s.error_msg?'border-red-500 border':''}"><h3 class="font-bold">\${s.name}</h3><div class="flex justify-between mt-2"><span>Bat: \${s.battery_level}%</span><span>Wifi: \${s.wifi_signal}%</span></div>\${s.error_msg?s.error_msg:''}</div>\`).join('')}</div>\`;
-            } else if (tab === 'cells') {
+            } 
+            
+            // --- RESTORED CELLS & TARIFFS & PROMOS & LOGS ---
+            else if (tab === 'cells') {
                  const res = await fetch('/api/admin/cells_live'); const cells = await res.json();
                  content.innerHTML = \`<div class="bg-white rounded shadow overflow-hidden"><table class="w-full text-sm text-left"><thead class="bg-gray-50 font-bold"><tr><th class="p-3">Станция</th><th class="p-3">Ячейка</th><th class="p-3">Статус</th><th class="p-3">Действие</th></tr></thead><tbody>\${cells.map(c => \`<tr><td class="p-3">\${c.station_name}</td><td class="p-3">\${c.cell_number}</td><td class="p-3">\${c.status}</td><td class="p-3"><button onclick="adminCmd(\${c.id},'open')" class="text-blue-600">Открыть</button></td></tr>\`).join('')}</tbody></table></div>\`;
             } else if (tab === 'tariffs') {
                  const res = await fetch('/api/admin/tariffs'); const tariffs = await res.json();
                  content.innerHTML = \`<div class="bg-white rounded shadow overflow-hidden"><table class="w-full text-sm text-left"><thead class="bg-gray-50 font-bold"><tr><th class="p-3">Станция</th><th class="p-3">Размер</th><th class="p-3">Цена</th></tr></thead><tbody>\${tariffs.map(t => \`<tr><td class="p-3">\${t.station_name}</td><td class="p-3">\${t.size}</td><td class="p-3"><input type="number" value="\${t.price_initial}" onchange="updateTariff(\${t.id}, this.value)" class="w-20 border rounded p-1"></td></tr>\`).join('')}</tbody></table></div>\`;
+            } else if (tab === 'promos') {
+                const res = await fetch('/api/admin/promos'); const promos = await res.json();
+                content.innerHTML = \`<div class="flex justify-between mb-4"><h2 class="text-xl font-bold">Промокоды</h2><button onclick="createPromo()" class="bg-indigo-600 text-white px-4 py-2 rounded font-bold text-sm">+ Создать</button></div><div class="bg-white rounded shadow overflow-hidden"><table class="w-full text-sm text-left"><thead class="bg-gray-50 font-bold"><tr><th class="p-3">Код</th><th class="p-3">Скидка</th><th class="p-3">Действие</th></tr></thead><tbody>\${promos.map(p=>\`<tr class="border-t"><td class="p-3 font-bold">\${p.code}</td><td class="p-3 text-green-600">-\${p.discount_percent}%</td><td class="p-3"><button onclick="deletePromo(\${p.id})" class="text-red-500">Удалить</button></td></tr>\`).join('')}</tbody></table></div>\`;
+            } else if (tab === 'logs') {
+                const res = await fetch('/api/admin/logs'); const logs = await res.json();
+                content.innerHTML = \`<div class="bg-white rounded shadow"><table class="w-full text-sm text-left"><thead class="bg-gray-50 font-bold"><tr><th class="p-3">Время</th><th class="p-3">Инфо</th></tr></thead><tbody>\${logs.map(l=>\`<tr><td class="p-3">\${new Date(l.created_at).toLocaleTimeString()}</td><td class="p-3">\${l.details}</td></tr>\`).join('')}</tbody></table></div>\`;
             }
-            // ... logs, promos etc
         }
         
         async function toggleBlock(id, block) { await fetch('/api/admin/user/block', {method:'POST', body: JSON.stringify({id, block})}); renderAdminTab('clients'); }
         async function simHeartbeat(id, bat, wifi, err = null) { await fetch('/api/hardware/heartbeat', { method: 'POST', body: JSON.stringify({ stationId: id, battery: bat, wifi: wifi, error: err }) }); renderAdminTab('monitoring'); }
         async function updateTariff(id, price) { await fetch('/api/admin/tariff/update', { method: 'POST', body: JSON.stringify({ id, price: parseInt(price) }) }); }
+        async function createPromo() { const c=prompt("Код:"); const d=prompt("Скидка %:"); if(c&&d) { await fetch('/api/admin/promo/create', { method: 'POST', body: JSON.stringify({ code: c.toUpperCase(), discount: parseInt(d) }) }); renderAdminTab('promos'); } }
+        async function deletePromo(id) { if(confirm('Удалить?')) { await fetch('/api/admin/promo/delete', { method: 'POST', body: JSON.stringify({ id }) }); renderAdminTab('promos'); } }
         async function adminCmd(cellId, cmd) { if(confirm('Открыть?')) { await fetch('/api/admin/command', {method:'POST', body:JSON.stringify({cellId, cmd})}); renderAdminTab('cells'); } }
 
         navigate('home');
