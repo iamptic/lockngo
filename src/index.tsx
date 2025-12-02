@@ -54,31 +54,127 @@ app.post('/api/book', async (c) => {
          await c.env.DB.prepare("UPDATE promo_codes SET usage_count = usage_count + 1 WHERE id = ?").bind(promo.id).run()
      }
   }
+  // Access Code is now a unique string for QR generation
+  const accessCode = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+  
   await c.env.DB.prepare("UPDATE cells SET status = 'booked' WHERE id = ?").bind(cell.id).run()
-  await c.env.DB.prepare("INSERT INTO bookings (user_id, cell_id, total_amount, status) VALUES (?, ?, ?, 'active')").bind(user.id, cell.id, price).run()
+  await c.env.DB.prepare("INSERT INTO bookings (user_id, cell_id, total_amount, status, access_code) VALUES (?, ?, ?, 'active', ?)").bind(user.id, cell.id, price, accessCode).run()
   await c.env.DB.prepare("UPDATE users SET ltv = ltv + ?, last_booking = CURRENT_TIMESTAMP WHERE id = ?").bind(price, user.id).run()
-  return c.json({ success: true, cellNumber: cell.cell_number, accessCode: Math.floor(100000 + Math.random() * 900000), validUntil: new Date(Date.now() + 24*60*60*1000).toISOString() })
+  return c.json({ success: true, cellNumber: cell.cell_number, accessCode, validUntil: new Date(Date.now() + 24*60*60*1000).toISOString() })
 })
 
-app.get('/api/admin/dashboard', async (c) => {
-  const stats = {
-    revenue: (await c.env.DB.prepare('SELECT sum(ltv) as s FROM users').first('s')) || 0, 
-    bookings_today: (await c.env.DB.prepare("SELECT count(*) as c FROM bookings WHERE start_time > date('now')").first('c')) || 0,
-    active_rentals: (await c.env.DB.prepare("SELECT count(*) as c FROM bookings WHERE status = 'active'").first('c')) || 0,
-    incidents: (await c.env.DB.prepare("SELECT count(*) as c FROM station_health WHERE error_msg IS NOT NULL").first('c')) || 0
-  }
-  return c.json(stats)
-})
-app.get('/api/admin/stations', async (c) => { const { results } = await c.env.DB.prepare(`SELECT s.*, h.battery_level, h.wifi_signal, h.last_heartbeat, h.error_msg, (SELECT count(*) FROM cells WHERE station_id = s.id AND status = 'free') as free_cells FROM stations s LEFT JOIN station_health h ON s.id = h.station_id`).all(); return c.json(results) })
-app.get('/api/admin/users', async (c) => { const { results } = await c.env.DB.prepare("SELECT * FROM users ORDER BY last_booking DESC LIMIT 100").all(); return c.json(results) })
-app.get('/api/admin/bookings', async (c) => { const { results } = await c.env.DB.prepare(`SELECT b.*, u.phone, c.cell_number, s.name as station_name FROM bookings b JOIN users u ON b.user_id = u.id JOIN cells c ON b.cell_id = c.id JOIN stations s ON c.station_id = s.id ORDER BY b.start_time DESC LIMIT 50`).all(); return c.json(results) })
-app.post('/api/admin/cell/open', async (c) => { const { cellId } = await c.req.json(); await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE id = ?").bind(cellId).run(); await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES ((SELECT station_id FROM cells WHERE id=?), 'admin_open', 'Remote Open')").bind(cellId, cellId).run(); return c.json({success: true}) })
-app.post('/api/hw/sync', async (c) => { const { id, battery, wifi, error } = await c.req.json(); let stationId = 1; await c.env.DB.prepare(`INSERT INTO station_health (station_id, battery_level, wifi_signal, last_heartbeat, error_msg) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?) ON CONFLICT(station_id) DO UPDATE SET battery_level = excluded.battery_level, wifi_signal = excluded.wifi_signal, last_heartbeat = CURRENT_TIMESTAMP, error_msg = excluded.error_msg`).bind(stationId, battery, wifi, error).run(); return c.json({ cmd: 'ok' }) })
+// --- HARDWARE API ---
+app.post('/api/station/scan', async (c) => {
+    // Station sends scanned QR code
+    const { station_id, qr_code } = await c.req.json();
+    const booking: any = await c.env.DB.prepare("SELECT b.*, c.cell_number, c.station_id FROM bookings b JOIN cells c ON b.cell_id = c.id WHERE b.access_code = ? AND b.status = 'active'").bind(qr_code).first();
+    
+    if (!booking) return c.json({ error: 'Invalid QR' }, 400);
+    if (booking.station_id != station_id) return c.json({ error: 'Wrong Station' }, 400);
 
+    // Open the door
+    await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE id = ?").bind(booking.cell_id).run();
+    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'qr_open', 'User scanned QR at station')").bind(station_id).run();
+    
+    return c.json({ success: true, open_cell: booking.cell_number });
+})
+
+app.post('/api/hw/sync', async (c) => { 
+    const { id, battery, wifi, error } = await c.req.json(); 
+    let stationId = 1; 
+    // Get screen content to send back to station
+    const station: any = await c.env.DB.prepare("SELECT screen_content, screen_mode FROM stations WHERE id = ?").bind(stationId).first();
+    
+    await c.env.DB.prepare(`INSERT INTO station_health (station_id, battery_level, wifi_signal, last_heartbeat, error_msg) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?) ON CONFLICT(station_id) DO UPDATE SET battery_level = excluded.battery_level, wifi_signal = excluded.wifi_signal, last_heartbeat = CURRENT_TIMESTAMP, error_msg = excluded.error_msg`).bind(stationId, battery, wifi, error).run(); 
+    
+    return c.json({ cmd: 'ok', screen: { mode: station?.screen_mode, content: station?.screen_content } }) 
+})
+
+// API: Get history for specific cell
+app.get('/api/admin/cell/:id/history', async (c) => {
+    const id = c.req.param('id');
+    const { results } = await c.env.DB.prepare(`
+        SELECT l.created_at, l.action, l.details 
+        FROM logs l 
+        WHERE l.details LIKE '%' || ? || '%' 
+        ORDER BY l.created_at DESC LIMIT 5
+    `).bind(id).all();
+    return c.json(results);
+})
 
 // --- FRONTEND HTML ---
 const adminHtml = `<!DOCTYPE html>
-<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Lock&Go Panel</title><script src="https://unpkg.com/vue@3/dist/vue.global.js"></script><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><style>body { font-family: 'Inter', sans-serif; background: #F3F4F6; } .sidebar-link.active { background: #4F46E5; color: white; } .sidebar-link:hover:not(.active) { background: #E5E7EB; } #map-admin { height: 600px; width: 100%; border-radius: 12px; }</style></head><body><div id="app" class="h-screen flex overflow-hidden"><div v-if="!auth" class="fixed inset-0 bg-gray-900 flex items-center justify-center z-50"><div class="bg-white p-8 rounded-2xl shadow-2xl w-96"><div class="flex justify-center mb-6 text-indigo-600 text-5xl"><i class="fas fa-cube"></i></div><h2 class="text-2xl font-bold text-center mb-6 text-gray-800">Lock&Go Admin</h2><input v-model="loginPass" type="password" placeholder="Password (12345)" class="w-full p-3 border rounded-lg mb-4 focus:ring-2 focus:ring-indigo-500 outline-none" @keyup.enter="doLogin"><button @click="doLogin" class="w-full bg-indigo-600 text-white font-bold py-3 rounded-lg hover:bg-indigo-700 transition">Войти</button></div></div><aside v-if="auth" class="w-64 bg-white border-r border-gray-200 flex flex-col hidden md:flex"><div class="h-16 flex items-center px-6 font-bold text-xl text-indigo-600 border-b border-gray-100"><i class="fas fa-cube mr-2"></i> Lock&Go</div><nav class="flex-1 p-4 space-y-1 overflow-y-auto"><a v-for="item in menu" :key="item.id" @click="setPage(item.id)" :class="{'active': page === item.id}" class="sidebar-link flex items-center px-4 py-3 rounded-lg text-gray-600 cursor-pointer transition font-medium"><i :class="item.icon" class="w-6"></i> {{ item.label }}</a></nav><div class="p-4 border-t border-gray-100"><div class="flex items-center gap-3"><div class="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold">DP</div><div><div class="text-sm font-bold text-gray-900">Danila Ptitsyn</div><div class="text-xs text-gray-500">Super Admin</div></div></div></div></aside><main v-if="auth" class="flex-1 flex flex-col overflow-hidden relative"><header class="bg-white h-16 border-b border-gray-200 flex items-center justify-between px-4 md:hidden shrink-0"><div class="font-bold text-indigo-600"><i class="fas fa-cube"></i> Lock&Go</div><button @click="showMobileMenu = !showMobileMenu"><i class="fas fa-bars text-gray-600 text-xl"></i></button></header><div class="flex-1 overflow-y-auto p-6"><div v-if="page === 'dashboard'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Обзор системы</h1><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8"><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Выручка</div><div class="text-3xl font-black text-gray-900">{{ stats.revenue }} ₽</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Активные</div><div class="text-3xl font-black text-indigo-600">{{ stats.active_rentals }}</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Инциденты</div><div class="text-3xl font-black" :class="stats.incidents>0?'text-red-600':'text-gray-900'">{{ stats.incidents }}</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Сегодня</div><div class="text-3xl font-black text-gray-900">{{ stats.bookings_today }}</div></div></div></div><div v-show="page === 'map'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Карта сети</h1><div id="map-admin" class="shadow-sm border border-gray-200"></div></div><div v-if="page === 'devices'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Оборудование</h1><div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"><table class="w-full text-sm text-left"><thead class="text-xs text-gray-400 uppercase bg-gray-50 border-b"><tr><th class="px-6 py-4">Станция</th><th class="px-6 py-4">Статус</th><th class="px-6 py-4">Батарея</th></tr></thead><tbody><tr v-for="s in stations" :key="s.id" class="border-b"><td class="px-6 py-4 font-bold">{{s.name}}</td><td class="px-6 py-4">{{s.error_msg?'Error':'Online'}}</td><td class="px-6 py-4">{{s.battery_level||0}}%</td></tr></tbody></table></div></div><div v-if="page === 'users'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Пользователи</h1><div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"><table class="w-full text-sm text-left"><thead class="text-xs text-gray-400 uppercase bg-gray-50 border-b"><tr><th class="px-6 py-4">Телефон</th><th class="px-6 py-4">LTV</th></tr></thead><tbody><tr v-for="u in users" :key="u.id" class="border-b"><td class="px-6 py-4 font-bold">{{u.phone}}</td><td class="px-6 py-4">{{u.ltv}} ₽</td></tr></tbody></table></div></div></div></main></div><script>const {createApp,ref,onMounted,watch,nextTick}=Vue;createApp({setup(){const auth=ref(false);const loginPass=ref('');const page=ref('dashboard');const stats=ref({});const stations=ref([]);const users=ref([]);const map=ref(null);const menu=[{id:'dashboard',label:'Главная',icon:'fas fa-home'},{id:'map',label:'Карта',icon:'fas fa-map'},{id:'devices',label:'Устройства',icon:'fas fa-server'},{id:'users',label:'Сотрудники',icon:'fas fa-users'}];const doLogin=()=>{if(loginPass.value==='12345'){auth.value=true;fetchData();}};const fetchData=async()=>{try{const [s,st,u]=await Promise.all([fetch('/api/admin/dashboard'),fetch('/api/admin/stations'),fetch('/api/admin/users')]);if(s.ok)stats.value=await s.json();if(st.ok){stations.value=await st.json();updateMap();}if(u.ok)users.value=await u.json();}catch(e){console.error('Fetch error',e)}};const setPage=(p)=>{page.value=p;if(p==='map'){nextTick(()=>initMap())}};const initMap=()=>{if(map.value)return;const el=document.getElementById('map-admin');if(!el)return;map.value=L.map('map-admin').setView([59.9343, 30.3351], 11);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map.value);updateMap();};const updateMap=()=>{if(!map.value || !stations.value.length)return;stations.value.forEach(s=>{if(s.lat && s.lng){L.marker([s.lat, s.lng]).addTo(map.value).bindPopup('<b>'+s.name+'</b><br>'+s.address)}})};setInterval(()=>{if(auth.value)fetchData()},5000);return{auth,loginPass,doLogin,page,menu,stats,stations,users,setPage}}}).mount('#app');</script></body></html>`
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Lock&Go Admin Pro</title><script src="https://unpkg.com/vue@3/dist/vue.global.js"></script><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><style>body { font-family: 'Inter', sans-serif; background: #F3F4F6; } [v-cloak] { display: none; } .sidebar-link.active { background: #4F46E5; color: white; } .sidebar-link:hover:not(.active) { background: #E5E7EB; } #map-admin { height: 600px; width: 100%; border-radius: 12px; } .cell-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 12px; } .cell-box { aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 12px; font-weight: bold; cursor: pointer; transition: all 0.2s; border: 2px solid transparent; } .cell-box:hover { transform: scale(1.05); z-index: 10; shadow: lg; } .cell-free { background: #DCFCE7; color: #166534; border-color: #BBF7D0; } .cell-booked { background: #FEE2E2; color: #991B1B; border-color: #FECACA; } .cell-maintenance { background: #F3F4F6; color: #6B7280; border-color: #E5E7EB; } .cell-selected { border-color: #4F46E5; ring: 2px; ring-color: #4F46E5; }</style></head><body><div id="app" v-cloak class="h-screen flex overflow-hidden">
+<!-- LOGIN -->
+<div v-if="!auth" class="fixed inset-0 bg-gray-900 flex items-center justify-center z-[100]"><div class="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md mx-4"><div class="flex justify-center mb-6 text-indigo-600 text-5xl"><i class="fas fa-cube"></i></div><h2 class="text-2xl font-bold text-center mb-6 text-gray-800">Lock&Go Admin</h2><input v-model="loginPass" type="password" placeholder="Password (12345)" class="w-full p-4 border border-gray-300 rounded-xl mb-4 focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none text-lg" @keyup.enter="doLogin"><button @click="doLogin" class="w-full bg-indigo-600 text-white font-bold py-4 rounded-xl hover:bg-indigo-700 transition text-lg shadow-lg shadow-indigo-200">Войти в систему</button></div></div>
+<!-- SIDEBAR -->
+<aside v-if="auth" class="w-64 bg-white border-r border-gray-200 flex flex-col hidden md:flex"><div class="h-16 flex items-center px-6 font-bold text-xl text-indigo-600 border-b border-gray-100"><i class="fas fa-cube mr-2"></i> Lock&Go <span class="text-xs bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded ml-2">PRO</span></div><nav class="flex-1 p-4 space-y-1 overflow-y-auto"><a v-for="item in menu" :key="item.id" @click="setPage(item.id)" :class="{'active': page === item.id}" class="sidebar-link flex items-center px-4 py-3 rounded-lg text-gray-600 cursor-pointer transition font-medium"><i :class="item.icon" class="w-6"></i> {{ item.label }}</a></nav><div class="p-4 border-t border-gray-100"><div class="flex items-center gap-3"><div class="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold">DP</div><div><div class="text-sm font-bold text-gray-900">Danila Ptitsyn</div><div class="text-xs text-gray-500">Super Admin</div></div></div></div></aside>
+<!-- MAIN -->
+<main v-if="auth" class="flex-1 flex flex-col overflow-hidden relative"><header class="bg-white h-16 border-b border-gray-200 flex items-center justify-between px-4 md:hidden shrink-0"><div class="font-bold text-indigo-600"><i class="fas fa-cube"></i> Lock&Go</div><button @click="showMobileMenu = !showMobileMenu"><i class="fas fa-bars text-gray-600 text-xl"></i></button></header><div class="flex-1 overflow-y-auto p-6">
+<!-- DASHBOARD -->
+<div v-if="page === 'dashboard'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Обзор системы</h1><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8"><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Выручка</div><div class="text-3xl font-black text-gray-900">{{ stats.revenue }} ₽</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Активные</div><div class="text-3xl font-black text-indigo-600">{{ stats.active_rentals }}</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Инциденты</div><div class="text-3xl font-black" :class="stats.incidents>0?'text-red-600':'text-gray-900'">{{ stats.incidents }}</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><div class="text-gray-400 text-sm font-medium mb-1">Сегодня</div><div class="text-3xl font-black text-gray-900">{{ stats.bookings_today }}</div></div></div></div>
+<!-- MAP -->
+<div v-show="page === 'map'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Карта сети</h1><div id="map-admin" class="shadow-sm border border-gray-200"></div></div>
+<!-- STATIONS LIST -->
+<div v-if="page === 'devices'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Оборудование</h1><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"><div v-for="s in stations" :key="s.id" @click="openStationDetail(s.id)" class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 cursor-pointer hover:border-indigo-500 transition group"><div class="flex justify-between items-start mb-4"><div class="w-12 h-12 rounded-lg bg-indigo-50 flex items-center justify-center text-indigo-600 text-xl group-hover:bg-indigo-600 group-hover:text-white transition"><i class="fas fa-server"></i></div><div class="px-3 py-1 rounded-full text-xs font-bold" :class="s.error_msg ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'">{{ s.error_msg ? 'Ошибка' : 'Online' }}</div></div><h3 class="font-bold text-lg mb-1">{{ s.name }}</h3><p class="text-sm text-gray-500 mb-4">{{ s.address }}</p><div class="flex items-center gap-4 text-sm text-gray-500"><div class="flex items-center gap-2"><i class="fas fa-battery-three-quarters"></i> {{ s.battery_level || 100 }}%</div><div class="flex items-center gap-2"><i class="fas fa-wifi"></i> {{ s.wifi_signal || 100 }}%</div></div></div></div></div>
+<!-- STATION DETAIL (DEEP DIVE) -->
+<div v-if="page === 'station_detail' && activeStation"><div class="flex items-center gap-4 mb-6"><button @click="page='devices'" class="w-10 h-10 rounded-lg bg-white border border-gray-200 flex items-center justify-center text-gray-600 hover:text-indigo-600"><i class="fas fa-arrow-left"></i></button><div><h1 class="text-2xl font-bold text-gray-900">{{ activeStation.station.name }}</h1><div class="text-sm text-gray-500">{{ activeStation.station.address }}</div></div><div class="ml-auto flex gap-3"><button @click="openAllCells(activeStation.station.id)" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2 shadow-lg shadow-red-200"><i class="fas fa-radiation"></i> ОТКРЫТЬ ВСЕ ЯЧЕЙКИ</button></div></div>
+<!-- SCREEN MANAGEMENT -->
+<div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-6"><h3 class="font-bold text-lg mb-4">Управление экраном станции</h3><div class="flex gap-4"><div class="flex-1"><label class="text-xs text-gray-500 font-bold block mb-1">Тип контента</label><select v-model="activeStation.station.screen_mode" class="w-full p-2 border rounded-lg"><option value="image">Изображение (URL)</option><option value="video">Видео (URL)</option><option value="text">Текст</option></select></div><div class="flex-[3]"><label class="text-xs text-gray-500 font-bold block mb-1">Контент / Ссылка</label><input v-model="activeStation.station.screen_content" class="w-full p-2 border rounded-lg" placeholder="https://example.com/banner.jpg"></div><button @click="updateScreen(activeStation.station)" class="bg-indigo-600 text-white px-6 rounded-lg font-bold hover:bg-indigo-700">Сохранить</button></div></div>
+<!-- GRID & TARIFFS -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6"><div class="lg:col-span-2"><div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-6"><h3 class="font-bold text-lg mb-4 flex items-center justify-between"><span>Ячейки ({{ activeStation.cells.length }})</span><span class="text-xs font-normal text-gray-400 flex gap-3"><span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-green-400"></span> Free</span><span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-400"></span> Booked</span></span></h3><div class="cell-grid"><div v-for="cell in activeStation.cells" :key="cell.id" class="cell-box relative" :class="{'cell-free': cell.status==='free', 'cell-booked': cell.status==='booked', 'cell-maintenance': cell.status==='maintenance'}" @click="selectCell(cell)"><div class="text-xs uppercase mb-1 opacity-50">{{ cell.size }}</div><div class="text-xl">{{ cell.cell_number }}</div><div v-if="cell.door_open" class="absolute top-1 right-1 text-red-500 text-[10px]"><i class="fas fa-lock-open"></i></div></div></div></div></div><div>
+<!-- TARIFFS -->
+<div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-6"><h3 class="font-bold text-lg mb-4">Тарифы</h3><div class="space-y-3"><div v-for="t in activeStation.tariffs" :key="t.id" class="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100"><div class="flex items-center gap-3"><div class="w-8 h-8 rounded bg-white border flex items-center justify-center font-bold text-gray-700">{{ t.size }}</div><div class="text-xs text-gray-500">{{ t.description }}</div></div><input type="number" v-model="t.price_initial" @change="updateTariff(t)" class="w-20 p-1 text-right font-bold bg-white border rounded focus:ring-2 focus:ring-indigo-500 outline-none"></div></div></div>
+<!-- HEALTH -->
+<div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100"><h3 class="font-bold text-lg mb-4">Состояние</h3><div class="space-y-4"><div class="flex justify-between items-center"><span class="text-gray-500">Батарея</span><span class="font-bold text-green-600">{{ activeStation.health?.battery_level || 100 }}%</span></div><div class="flex justify-between items-center"><span class="text-gray-500">Wi-Fi Сигнал</span><span class="font-bold">{{ activeStation.health?.wifi_signal || -60 }} dBm</span></div><div class="flex justify-between items-center"><span class="text-gray-500">Последний пинг</span><span class="text-xs font-mono">{{ activeStation.health?.last_heartbeat || 'Never' }}</span></div></div></div></div></div></div>
+<!-- LOGS -->
+<div v-if="page === 'logs'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Журнал событий</h1><div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"><table class="w-full text-sm text-left"><thead class="text-xs text-gray-400 uppercase bg-gray-50 border-b"><tr><th class="px-6 py-4">Время</th><th class="px-6 py-4">Станция</th><th class="px-6 py-4">Действие</th><th class="px-6 py-4">Детали</th></tr></thead><tbody><tr v-for="l in logs" :key="l.id" class="border-b hover:bg-gray-50"><td class="px-6 py-4 font-mono text-xs text-gray-500">{{ new Date(l.created_at).toLocaleString() }}</td><td class="px-6 py-4 font-bold">{{ l.station_name || '-' }}</td><td class="px-6 py-4"><span class="px-2 py-1 rounded bg-gray-100 text-xs font-bold uppercase">{{ l.action }}</span></td><td class="px-6 py-4 text-gray-600">{{ l.details }}</td></tr></tbody></table></div></div>
+<!-- USERS -->
+<div v-if="page === 'users'"><h1 class="text-2xl font-bold text-gray-900 mb-6">Персонал и Клиенты</h1><div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"><table class="w-full text-sm text-left"><thead class="text-xs text-gray-400 uppercase bg-gray-50 border-b"><tr><th class="px-6 py-4">Телефон</th><th class="px-6 py-4">Имя</th><th class="px-6 py-4">Роль</th><th class="px-6 py-4">LTV</th></tr></thead><tbody><tr v-for="u in users" :key="u.id" class="border-b"><td class="px-6 py-4 font-bold">{{u.phone}}</td><td class="px-6 py-4">{{u.name||'-'}}</td><td class="px-6 py-4"><select v-model="u.role" @change="updateRole(u)" class="p-1 bg-gray-50 border rounded text-xs font-bold uppercase" :class="{'text-indigo-600': u.role==='admin', 'text-green-600': u.role==='support'}"><option value="user">User</option><option value="support">Support</option><option value="admin">Admin</option></select></td><td class="px-6 py-4">{{u.ltv}} ₽</td></tr></tbody></table></div></div>
+</div></main></div>
+<!-- CELL MODAL -->
+<div v-if="selectedCell && selectedCell.id" class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center" @click.self="selectedCell=null">
+    <div class="bg-white rounded-2xl p-6 w-96 shadow-2xl">
+        <div class="flex justify-between items-center mb-6"><h3 class="text-xl font-bold">Ячейка {{ selectedCell.cell_number }}</h3><button @click="selectedCell=null" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button></div>
+        <div class="grid grid-cols-2 gap-4 mb-6">
+            <div class="bg-gray-50 p-3 rounded-lg"><div class="text-xs text-gray-500 uppercase">Размер</div><div class="font-bold text-lg">{{ selectedCell.size }}</div></div>
+            <div class="bg-gray-50 p-3 rounded-lg"><div class="text-xs text-gray-500 uppercase">Статус</div><div class="font-bold text-lg capitalize" :class="{'text-green-600': selectedCell.status==='free', 'text-red-600': selectedCell.status==='booked'}">{{ selectedCell.status }}</div></div>
+        </div>
+        <button @click="remoteOpen(selectedCell.id)" class="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl mb-3 hover:bg-indigo-700"><i class="fas fa-lock-open mr-2"></i> Открыть удаленно</button>
+        
+        <!-- History Section -->
+        <div class="mt-4">
+            <div class="text-xs font-bold text-gray-400 uppercase mb-2">История событий</div>
+            <div v-if="!cellHistory || cellHistory.length === 0" class="text-sm text-gray-400 text-center py-2">Нет записей</div>
+            <div v-else class="space-y-2 max-h-32 overflow-y-auto">
+                <div v-for="h in cellHistory" :key="h.created_at" class="text-xs border-b pb-1">
+                    <div class="flex justify-between"><span class="font-bold">{{ h.action }}</span><span class="text-gray-500">{{ new Date(h.created_at).toLocaleTimeString() }}</span></div>
+                    <div class="text-gray-500 truncate">{{ h.details }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<script>const {createApp,ref,onMounted,watch,nextTick}=Vue;createApp({setup(){const auth=ref(false);const loginPass=ref('');const page=ref('dashboard');const stats=ref({});const stations=ref([]);const users=ref([]);const logs=ref([]);const activeStation=ref(null);const selectedCell=ref(null);const cellHistory=ref([]);const map=ref(null);const menu=[{id:'dashboard',label:'Главная',icon:'fas fa-home'},{id:'map',label:'Карта',icon:'fas fa-map'},{id:'devices',label:'Устройства',icon:'fas fa-server'},{id:'users',label:'Персонал',icon:'fas fa-users'},{id:'logs',label:'Логи',icon:'fas fa-list-ul'}];
+const doLogin=()=>{if(loginPass.value==='12345'){auth.value=true;fetchData();}};
+const fetchData=async()=>{try{const [s,st,u,l]=await Promise.all([fetch('/api/admin/dashboard'),fetch('/api/admin/stations'),fetch('/api/admin/users'),fetch('/api/admin/logs')]);if(s.ok)stats.value=await s.json();if(st.ok){stations.value=await st.json();updateMap();}if(u.ok)users.value=await u.json();if(l.ok)logs.value=await l.json();}catch(e){console.error('Fetch error',e)}};
+const setPage=(p)=>{page.value=p;if(p==='map'){nextTick(()=>initMap())}else if(p==='logs'){fetchData()}};
+const initMap=()=>{if(map.value)return;const el=document.getElementById('map-admin');if(!el)return;map.value=L.map('map-admin').setView([59.9343, 30.3351], 11);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map.value);updateMap();};
+const updateMap=()=>{if(!map.value || !stations.value.length)return;stations.value.forEach(s=>{if(s.lat && s.lng){L.marker([s.lat, s.lng]).addTo(map.value).bindPopup('<b>'+s.name+'</b><br>'+s.address).on('click', ()=>openStationDetail(s.id))}})};
+const openStationDetail=async(id)=>{const res=await fetch('/api/admin/station/'+id+'/details');if(res.ok){activeStation.value=await res.json();page.value='station_detail'}};
+const selectCell=async(cell)=>{
+    selectedCell.value=cell;
+    cellHistory.value=[];
+    const res = await fetch('/api/admin/cell/'+cell.id+'/history');
+    if(res.ok) cellHistory.value = await res.json();
+};
+const remoteOpen=async(id)=>{if(!confirm('Открыть ячейку удаленно? Это действие будет записано в лог.'))return;await fetch('/api/admin/cell/open',{method:'POST',body:JSON.stringify({cellId:id})});alert('Команда отправлена');selectedCell.value=null;openStationDetail(activeStation.value.station.id);};
+const openAllCells=async(sid)=>{const code=prompt('ВВЕДИТЕ "CONFIRM" ЧТОБЫ ОТКРЫТЬ ВСЕ ЯЧЕЙКИ. ЭТО ЭКСТРЕННОЕ ДЕЙСТВИЕ!');if(code!=='CONFIRM')return;await fetch('/api/admin/station/'+sid+'/open-all',{method:'POST'});alert('Команда массового открытия отправлена!');openStationDetail(sid)};
+const updateTariff=async(t)=>{await fetch('/api/admin/tariffs',{method:'POST',body:JSON.stringify({id:t.id,price:t.price_initial})});};
+const updateRole=async(u)=>{await fetch('/api/admin/users/role',{method:'POST',body:JSON.stringify({userId:u.id,role:u.role})});alert('Роль обновлена')};
+const updateScreen=async(s)=>{await fetch('/api/admin/station/'+s.id+'/screen',{method:'POST',body:JSON.stringify({content:s.screen_content,mode:s.screen_mode})});alert('Экран обновлен')};
+setInterval(()=>{if(auth.value && page.value==='dashboard')fetchData()},5000);return{auth,loginPass,doLogin,page,menu,stats,stations,users,logs,activeStation,selectedCell,cellHistory,setPage,openStationDetail,selectCell,remoteOpen,openAllCells,updateTariff,updateRole,updateScreen}}}).mount('#app');</script></body></html>`
+
 
 const userHtml = `<!DOCTYPE html>
 <html lang="ru">
@@ -179,9 +275,28 @@ const userHtml = `<!DOCTYPE html>
 
         const SuccessView=(data)=>\`
             <div class="flex flex-col h-full brand-gradient text-white p-8 items-center justify-center text-center">
-                <div class="w-24 h-24 bg-white/20 backdrop-blur rounded-full flex items-center justify-center text-4xl mb-8 animate-bounce"><i class="fas fa-unlock-alt"></i></div>
+                <div class="w-24 h-24 bg-white/20 backdrop-blur rounded-full flex items-center justify-center text-4xl mb-4 animate-bounce"><i class="fas fa-unlock-alt"></i></div>
                 <h1 class="text-3xl font-bold mb-2">Ячейка открыта!</h1>
-                <div class="bg-white text-gray-900 rounded-2xl p-8 w-full shadow-2xl mb-8"><div class="text-gray-400 text-xs uppercase font-bold mb-1">Номер ячейки</div><div class="text-7xl font-black text-indigo-600 mb-4">\${data.cellNumber}</div><div class="h-px bg-gray-100 w-full my-4"></div><div class="text-gray-400 text-xs uppercase font-bold mb-1">Код доступа</div><div class="text-2xl font-mono font-bold text-gray-800 tracking-widest">\${data.accessCode}</div></div>
+                
+                <!-- QR CODE FOR STATION SCANNER -->
+                <div class="bg-white text-gray-900 rounded-2xl p-6 w-full shadow-2xl mb-6">
+                    <div class="text-xs uppercase font-bold text-gray-400 mb-2">Покажите сканеру на станции</div>
+                    <div class="flex justify-center mb-4">
+                        <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=\${data.accessCode}" class="rounded-lg border-4 border-gray-100">
+                    </div>
+                    <div class="h-px bg-gray-100 w-full mb-4"></div>
+                    <div class="flex justify-between">
+                        <div class="text-left">
+                            <div class="text-gray-400 text-xs uppercase font-bold">Ячейка</div>
+                            <div class="text-4xl font-black text-indigo-600">\${data.cellNumber}</div>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-gray-400 text-xs uppercase font-bold">Действует до</div>
+                            <div class="text-sm font-bold text-gray-700">\${new Date(data.validUntil).toLocaleTimeString().slice(0,5)}</div>
+                        </div>
+                    </div>
+                </div>
+
                 <button onclick="navigate('home')" class="mt-auto w-full py-4 text-white/80 hover:text-white font-bold">Вернуться на главную</button>
             </div>\`;
 

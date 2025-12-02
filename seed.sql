@@ -4,7 +4,7 @@ DROP TABLE IF EXISTS users;
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     phone TEXT UNIQUE NOT NULL,
-    role TEXT DEFAULT 'user', -- user, admin, ics
+    role TEXT DEFAULT 'user', -- user, admin, support
     name TEXT,
     email TEXT,
     ltv REAL DEFAULT 0,
@@ -20,8 +20,17 @@ CREATE TABLE stations (
     address TEXT,
     lat REAL,
     lng REAL,
+    screen_content TEXT DEFAULT 'Welcome to LocknGo', -- Text or Image URL
+    screen_mode TEXT DEFAULT 'image', -- text, image, video
     api_key TEXT
 );
+
+-- ... (rest of tables)
+
+-- Seed Users with Roles
+INSERT INTO users (phone, role, name, ltv) VALUES ('+79990000001', 'admin', 'Danila Admin', 0);
+INSERT INTO users (phone, role, name, ltv) VALUES ('+79990000002', 'support', 'Tech Support 1', 0);
+
 
 DROP TABLE IF EXISTS cells;
 CREATE TABLE cells (
@@ -90,13 +99,52 @@ CREATE TABLE logs (
 INSERT INTO stations (name, address, lat, lng) VALUES ('ТЦ Галерея', 'Лиговский пр., 30А', 59.9275, 30.3600);
 INSERT INTO stations (name, address, lat, lng) VALUES ('Аэропорт Пулково', 'Пулковское ш., 41', 59.8003, 30.2625);
 
+-- STATION 1 CELLS (32 cells total)
+-- Row 1 (Small)
 INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'A01', 'S');
 INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'A02', 'S');
-INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'B01', 'M');
-INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'C01', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'A03', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'A04', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'A05', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'A06', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'A07', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'A08', 'S');
+-- Row 2 (Small)
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'B01', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'B02', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'B03', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'B04', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'B05', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'B06', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'B07', 'S');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'B08', 'S');
+-- Row 3 (Medium)
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'C01', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'C02', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'C03', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'C04', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'C05', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'C06', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'C07', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'C08', 'M');
+-- Row 4 (Large)
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D01', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D02', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D03', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D04', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D05', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D06', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D07', 'L');
+INSERT INTO cells (station_id, cell_number, size) VALUES (1, 'D08', 'L');
+
+-- STATION 2 CELLS (Minimal)
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A01', 'M');
+INSERT INTO cells (station_id, cell_number, size) VALUES (2, 'A02', 'L');
 
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (1, 'S', 'Маленькая (сумка)', 100);
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (1, 'M', 'Средняя (чемодан)', 200);
 INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (1, 'L', 'Большая (лыжи)', 300);
+INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (2, 'M', 'Standard', 250);
+INSERT INTO tariffs (station_id, size, description, price_initial) VALUES (2, 'L', 'Large', 450);
 
 INSERT INTO promo_codes (code, discount_percent) VALUES ('WELCOME', 50);
