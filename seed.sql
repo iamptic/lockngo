@@ -1,6 +1,14 @@
 PRAGMA foreign_keys = OFF;
 
+DROP TABLE IF EXISTS logs;
+DROP TABLE IF EXISTS station_health;
+DROP TABLE IF EXISTS bookings;
+DROP TABLE IF EXISTS promo_codes;
+DROP TABLE IF EXISTS tariffs;
+DROP TABLE IF EXISTS cells;
+DROP TABLE IF EXISTS stations;
 DROP TABLE IF EXISTS users;
+
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     phone TEXT UNIQUE NOT NULL,
@@ -13,7 +21,6 @@ CREATE TABLE users (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-DROP TABLE IF EXISTS stations;
 CREATE TABLE stations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -25,14 +32,6 @@ CREATE TABLE stations (
     api_key TEXT
 );
 
--- ... (rest of tables)
-
--- Seed Users with Roles
-INSERT INTO users (phone, role, name, ltv) VALUES ('+79990000001', 'admin', 'Danila Admin', 0);
-INSERT INTO users (phone, role, name, ltv) VALUES ('+79990000002', 'support', 'Tech Support 1', 0);
-
-
-DROP TABLE IF EXISTS cells;
 CREATE TABLE cells (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     station_id INTEGER,
@@ -43,7 +42,6 @@ CREATE TABLE cells (
     FOREIGN KEY(station_id) REFERENCES stations(id)
 );
 
-DROP TABLE IF EXISTS tariffs;
 CREATE TABLE tariffs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     station_id INTEGER,
@@ -53,7 +51,6 @@ CREATE TABLE tariffs (
     duration_minutes INTEGER
 );
 
-DROP TABLE IF EXISTS bookings;
 CREATE TABLE bookings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -67,7 +64,6 @@ CREATE TABLE bookings (
     FOREIGN KEY(cell_id) REFERENCES cells(id)
 );
 
-DROP TABLE IF EXISTS promo_codes;
 CREATE TABLE promo_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT UNIQUE,
@@ -77,7 +73,6 @@ CREATE TABLE promo_codes (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-DROP TABLE IF EXISTS station_health;
 CREATE TABLE station_health (
     station_id INTEGER PRIMARY KEY,
     battery_level INTEGER,
@@ -86,7 +81,6 @@ CREATE TABLE station_health (
     error_msg TEXT
 );
 
-DROP TABLE IF EXISTS logs;
 CREATE TABLE logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     station_id INTEGER,
@@ -94,6 +88,11 @@ CREATE TABLE logs (
     details TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Seed Users with Roles
+INSERT INTO users (phone, role, name, ltv) VALUES ('+79990000001', 'admin', 'Danila Admin', 0);
+INSERT INTO users (phone, role, name, ltv) VALUES ('+79990000002', 'support', 'Tech Support 1', 0);
+
 
 -- Seed Data
 INSERT INTO stations (name, address, lat, lng) VALUES ('ТЦ Галерея', 'Лиговский пр., 30А', 59.9275, 30.3600);

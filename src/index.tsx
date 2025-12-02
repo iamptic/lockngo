@@ -66,6 +66,87 @@ app.post('/api/book', async (c) => {
   return c.json({ success: true, cellNumber: cell.cell_number, accessCode, validUntil: new Date(Date.now() + 24*60*60*1000).toISOString() })
 })
 
+// --- ADMIN API (RESTORED) ---
+
+app.get('/api/admin/dashboard', async (c) => {
+    const revenue: any = await c.env.DB.prepare("SELECT SUM(total_amount) as total FROM bookings WHERE status = 'active' OR status = 'completed'").first();
+    const activeRentals: any = await c.env.DB.prepare("SELECT COUNT(*) as count FROM bookings WHERE status = 'active'").first();
+    const incidents: any = await c.env.DB.prepare("SELECT COUNT(*) as count FROM station_health WHERE error_msg IS NOT NULL").first();
+    const today: any = await c.env.DB.prepare("SELECT COUNT(*) as count FROM bookings WHERE created_at >= date('now')").first();
+    
+    return c.json({
+        revenue: revenue?.total || 0,
+        active_rentals: activeRentals?.count || 0,
+        incidents: incidents?.count || 0,
+        bookings_today: today?.count || 0
+    });
+});
+
+app.get('/api/admin/stations', async (c) => {
+    const stations: any = await c.env.DB.prepare(`
+        SELECT s.*, h.battery_level, h.wifi_signal, h.last_heartbeat, h.error_msg 
+        FROM stations s 
+        LEFT JOIN station_health h ON s.id = h.station_id
+    `).all();
+    return c.json(stations.results);
+});
+
+app.get('/api/admin/users', async (c) => {
+    const { results } = await c.env.DB.prepare("SELECT * FROM users ORDER BY last_booking DESC LIMIT 50").all();
+    return c.json(results);
+});
+
+app.get('/api/admin/logs', async (c) => {
+    const { results } = await c.env.DB.prepare(`
+        SELECT l.*, s.name as station_name 
+        FROM logs l 
+        LEFT JOIN stations s ON l.station_id = s.id 
+        ORDER BY l.created_at DESC LIMIT 100
+    `).all();
+    return c.json(results);
+});
+
+app.get('/api/admin/station/:id/details', async (c) => {
+    const id = c.req.param('id');
+    const station: any = await c.env.DB.prepare(`
+        SELECT s.*, h.battery_level, h.wifi_signal, h.last_heartbeat, h.error_msg 
+        FROM stations s 
+        LEFT JOIN station_health h ON s.id = h.station_id
+        WHERE s.id = ?
+    `).bind(id).first();
+    
+    const cells: any = await c.env.DB.prepare("SELECT * FROM cells WHERE station_id = ? ORDER BY cell_number ASC").bind(id).all();
+    const tariffs: any = await c.env.DB.prepare("SELECT * FROM tariffs WHERE station_id = ?").bind(id).all();
+    
+    return c.json({ station, cells: cells.results, tariffs: tariffs.results, health: station });
+});
+
+app.post('/api/admin/station/:id/open-all', async (c) => {
+    const id = c.req.param('id');
+    await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE station_id = ?").bind(id).run();
+    await c.env.DB.prepare("INSERT INTO logs (station_id, action, details) VALUES (?, 'panic_open', 'EMERGENCY: OPEN ALL CELLS')").bind(id).run();
+    return c.json({ success: true });
+});
+
+app.post('/api/admin/tariffs', async (c) => {
+    const { id, price } = await c.req.json();
+    await c.env.DB.prepare("UPDATE tariffs SET price_initial = ? WHERE id = ?").bind(price, id).run();
+    return c.json({ success: true });
+});
+
+app.post('/api/admin/users/role', async (c) => {
+    const { userId, role } = await c.req.json();
+    await c.env.DB.prepare("UPDATE users SET role = ? WHERE id = ?").bind(role, userId).run();
+    return c.json({ success: true });
+});
+
+app.post('/api/admin/station/:id/screen', async (c) => {
+    const id = c.req.param('id');
+    const { content, mode } = await c.req.json();
+    await c.env.DB.prepare("UPDATE stations SET screen_content = ?, screen_mode = ? WHERE id = ?").bind(content, mode, id).run();
+    return c.json({ success: true });
+});
+
 // --- HARDWARE API ---
 app.post('/api/station/scan', async (c) => {
     // Station sends scanned QR code
