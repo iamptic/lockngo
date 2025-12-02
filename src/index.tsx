@@ -17,7 +17,6 @@ app.use('/static/*', serveStatic({ root: './public' }))
 
 // 1. Public API
 app.get('/api/locations', async (c) => {
-  // В реале тут был бы сложный запрос с геолокацией
   const { results } = await c.env.DB.prepare('SELECT * FROM stations').all()
   return c.json(results)
 })
@@ -28,7 +27,6 @@ app.get('/api/location/:id', async (c) => {
   const cells = await c.env.DB.prepare('SELECT * FROM cells WHERE station_id = ?').bind(id).all()
   const tariffs = await c.env.DB.prepare('SELECT * FROM tariffs WHERE station_id = ?').bind(id).all()
   
-  // Группировка статистики
   const available = {
     S: cells.results.filter((cell: any) => cell.size === 'S' && cell.status === 'free').length,
     M: cells.results.filter((cell: any) => cell.size === 'M' && cell.status === 'free').length,
@@ -38,24 +36,42 @@ app.get('/api/location/:id', async (c) => {
   return c.json({ station, available, tariffs: tariffs.results })
 })
 
+app.post('/api/check-promo', async (c) => {
+  const { code } = await c.req.json()
+  const promo: any = await c.env.DB.prepare("SELECT * FROM promo_codes WHERE code = ? AND is_active = 1").bind(code).first()
+  
+  if (!promo) return c.json({ valid: false, error: 'Промокод не найден' })
+  
+  return c.json({ 
+    valid: true, 
+    discount: promo.discount_percent,
+    code: promo.code
+  })
+})
+
 app.post('/api/book', async (c) => {
   const { stationId, size, userType, promoCode } = await c.req.json()
   
-  // Логика проверки MICE/Театра
-  // Если MICE и нет кода -> ошибка
-  // Если Театр и билет не валиден -> ошибка (эмуляция)
-  
+  // 1. Проверяем промокод если есть
+  let discount = 0;
+  if (promoCode) {
+     const promo: any = await c.env.DB.prepare("SELECT * FROM promo_codes WHERE code = ? AND is_active = 1").bind(promoCode).first()
+     if (promo) {
+         discount = promo.discount_percent;
+         // Увеличиваем счетчик использования
+         await c.env.DB.prepare("UPDATE promo_codes SET usage_count = usage_count + 1 WHERE id = ?").bind(promo.id).run()
+     }
+  }
+
   const cell: any = await c.env.DB.prepare(
     "SELECT * FROM cells WHERE station_id = ? AND size = ? AND status = 'free' LIMIT 1"
   ).bind(stationId, size).first()
 
   if (!cell) return c.json({ error: 'Нет свободных ячеек выбранного размера' }, 400)
 
-  // Бронируем
   await c.env.DB.prepare("UPDATE cells SET status = 'booked' WHERE id = ?").bind(cell.id).run()
 
-  // Логируем событие
-  const logDetail = `Booking: ${size} | Type: ${userType || 'Standard'} | Code: ${promoCode || 'None'}`
+  const logDetail = `Booking: ${size} | Promo: ${promoCode || 'None'} (-${discount}%)`
   await c.env.DB.prepare(
     "INSERT INTO logs (station_id, action, details) VALUES (?, 'booking', ?)"
   ).bind(stationId, logDetail).run()
@@ -68,13 +84,13 @@ app.post('/api/book', async (c) => {
   })
 })
 
-// 2. Admin API (Secure)
+// 2. Admin API
 app.get('/api/admin/dashboard', async (c) => {
   const stats = {
-    revenue: 142500, // Заглушка, нужна таблица payments
+    revenue: 142500, 
     stations_online: await c.env.DB.prepare('SELECT count(*) as c FROM stations').first('c'),
     cells_occupied: await c.env.DB.prepare("SELECT count(*) as c FROM cells WHERE status != 'free'").first('c'),
-    incidents: 2 // Пример
+    incidents: 0
   }
   return c.json(stats)
 })
@@ -89,9 +105,48 @@ app.get('/api/admin/cells_live', async (c) => {
   return c.json(results)
 })
 
+// --- NEW: Tariffs Management ---
+app.get('/api/admin/tariffs', async (c) => {
+  const { results } = await c.env.DB.prepare(`
+    SELECT t.*, s.name as station_name 
+    FROM tariffs t
+    JOIN stations s ON t.station_id = s.id
+    ORDER BY s.name
+  `).all()
+  return c.json(results)
+})
+
+app.post('/api/admin/tariff/update', async (c) => {
+  const { id, price } = await c.req.json()
+  await c.env.DB.prepare("UPDATE tariffs SET price_initial = ? WHERE id = ?").bind(price, id).run()
+  return c.json({ success: true })
+})
+
+// --- NEW: Promo Management ---
+app.get('/api/admin/promos', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM promo_codes ORDER BY created_at DESC').all()
+  return c.json(results)
+})
+
+app.post('/api/admin/promo/create', async (c) => {
+  const { code, discount } = await c.req.json()
+  try {
+    await c.env.DB.prepare("INSERT INTO promo_codes (code, discount_percent) VALUES (?, ?)").bind(code, discount).run()
+    return c.json({ success: true })
+  } catch(e) {
+    return c.json({ error: 'Код уже существует' }, 400)
+  }
+})
+
+app.post('/api/admin/promo/delete', async (c) => {
+  const { id } = await c.req.json()
+  await c.env.DB.prepare("DELETE FROM promo_codes WHERE id = ?").bind(id).run()
+  return c.json({ success: true })
+})
+
+
 app.post('/api/admin/command', async (c) => {
   const { cellId, cmd } = await c.req.json()
-  // Тут отправка MQTT команды на контроллер
   if (cmd === 'open') {
     await c.env.DB.prepare("UPDATE cells SET door_open = 1 WHERE id = ?").bind(cellId).run()
     await c.env.DB.prepare("INSERT INTO logs (action, details) VALUES ('admin_cmd', ?)").bind(`Force OPEN cell ${cellId}`).run()
@@ -130,11 +185,10 @@ app.get('*', (c) => {
 
     <script>
         // --- State ---
-        const state = { view: 'home', data: {}, user: { phone: null } };
+        const state = { view: 'home', data: {}, activePromo: null };
 
         // --- Components ---
 
-        // 1. Главный экран (Список)
         const HomeView = () => \`
             <div class="flex flex-col h-full">
                 <div class="bg-white px-6 py-4 border-b flex justify-between items-center sticky top-0 z-10">
@@ -145,7 +199,6 @@ app.get('*', (c) => {
                 </div>
                 
                 <div class="p-4 space-y-4 overflow-y-auto flex-1 pb-20">
-                    <!-- Promo Banner -->
                     <div class="brand-gradient rounded-2xl p-6 text-white shadow-lg relative overflow-hidden">
                         <div class="absolute top-0 right-0 opacity-10 text-9xl transform translate-x-8 -translate-y-4"><i class="fas fa-layer-group"></i></div>
                         <h2 class="font-bold text-2xl mb-1">Свободные руки</h2>
@@ -153,7 +206,6 @@ app.get('*', (c) => {
                         <button class="bg-white text-indigo-700 px-4 py-2 rounded-lg text-xs font-bold shadow-md uppercase tracking-wide">Как это работает?</button>
                     </div>
 
-                    <!-- Filters -->
                     <div class="flex gap-2 overflow-x-auto hide-scrollbar pb-2">
                         <span class="px-4 py-2 bg-gray-900 text-white rounded-full text-xs font-bold whitespace-nowrap">Все</span>
                         <span class="px-4 py-2 bg-white border border-gray-200 text-gray-600 rounded-full text-xs font-bold whitespace-nowrap">Торговые центры</span>
@@ -161,13 +213,11 @@ app.get('*', (c) => {
                         <span class="px-4 py-2 bg-white border border-gray-200 text-gray-600 rounded-full text-xs font-bold whitespace-nowrap">MICE</span>
                     </div>
 
-                    <!-- List Container -->
                     <div id="stations-list" class="space-y-3">
                         <div class="text-center py-8 text-gray-400"><i class="fas fa-circle-notch fa-spin"></i> Загрузка...</div>
                     </div>
                 </div>
 
-                <!-- Tab Bar -->
                 <div class="bg-white border-t px-6 py-3 flex justify-between items-center text-xs text-gray-400 sticky bottom-0">
                     <button class="flex flex-col items-center text-indigo-600 font-bold"><i class="fas fa-map-marker-alt text-lg mb-1"></i>Карта</button>
                     <button class="flex flex-col items-center hover:text-gray-800"><i class="fas fa-qrcode text-lg mb-1"></i>Сканер</button>
@@ -177,12 +227,10 @@ app.get('*', (c) => {
             </div>
         \`;
 
-        // 2. Экран бронирования (Адаптивный под тип локации)
         const BookingView = (station) => {
             const isTheatre = station.type === 'theatre';
             const isMice = station.type === 'mice';
-            const isMall = station.type === 'mall';
-
+            
             return \`
             <div class="flex flex-col h-full bg-white">
                 <div class="px-4 py-4 border-b flex items-center sticky top-0 bg-white z-10">
@@ -196,117 +244,82 @@ app.get('*', (c) => {
                             <i class="fas fa-map-pin mt-1 text-indigo-500"></i>
                             <span class="text-sm">\${station.address}</span>
                         </div>
-                        
-                        <!-- Context Badge -->
-                        \${isTheatre ? '<div class="bg-purple-50 text-purple-700 px-3 py-2 rounded-lg text-sm font-medium"><i class="fas fa-theater-masks mr-2"></i>Режим театра: Бесплатно по билету</div>' : ''}
-                        \${isMice ? '<div class="bg-blue-50 text-blue-700 px-3 py-2 rounded-lg text-sm font-medium"><i class="fas fa-id-badge mr-2"></i>Режим MICE: Для участников форума</div>' : ''}
+                        \${isTheatre ? '<div class="bg-purple-50 text-purple-700 px-3 py-2 rounded-lg text-sm font-medium"><i class="fas fa-theater-masks mr-2"></i>Режим театра</div>' : ''}
+                        \${isMice ? '<div class="bg-blue-50 text-blue-700 px-3 py-2 rounded-lg text-sm font-medium"><i class="fas fa-id-badge mr-2"></i>Режим MICE</div>' : ''}
                     </div>
 
                     <h3 class="font-bold mb-3">Выберите размер</h3>
                     <div id="tariffs-list" class="space-y-3 mb-6">Loading...</div>
 
-                    <!-- Special Inputs -->
-                    \${isMice ? \`
-                        <div class="mb-6">
-                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1">Код участника / Бейдж</label>
-                            <input type="text" placeholder="Введите ID с бейджа" class="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 focus:border-indigo-500 outline-none font-mono">
+                    <!-- PROMO CODE INPUT -->
+                    <div class="mb-6 bg-gray-50 p-4 rounded-xl">
+                        <label class="block text-xs font-bold text-gray-500 uppercase mb-2">Промокод</label>
+                        <div class="flex gap-2">
+                            <input type="text" id="promoInput" placeholder="Введите код" class="flex-1 p-2 bg-white rounded border border-gray-200 focus:border-indigo-500 outline-none font-mono uppercase">
+                            <button onclick="checkPromo()" class="bg-gray-900 text-white px-4 rounded font-bold text-sm">Применить</button>
                         </div>
-                    \` : ''}
-
-                    \${isTheatre ? \`
-                         <button class="w-full py-3 border-2 border-dashed border-gray-300 rounded-xl text-gray-500 mb-6 flex items-center justify-center gap-2 hover:bg-gray-50 hover:border-gray-400">
-                            <i class="fas fa-camera"></i> Сканировать билет
-                         </button>
-                    \` : ''}
-
+                        <div id="promoStatus" class="mt-2 text-xs font-bold hidden"></div>
+                    </div>
                 </div>
 
                 <div class="p-4 border-t">
                     <div class="flex justify-between items-center mb-4">
                         <span class="text-gray-500 text-sm">Итого к оплате:</span>
-                        <span class="text-xl font-black text-gray-900" id="total-price">--</span>
+                        <div class="text-right">
+                            <span class="text-xl font-black text-gray-900" id="total-price">--</span>
+                            <div id="discount-label" class="text-xs text-green-600 font-bold hidden"></div>
+                        </div>
                     </div>
                     <button onclick="processBooking(\${station.id})" class="w-full brand-gradient text-white font-bold py-4 rounded-xl shadow-lg hover:shadow-xl transition transform active:scale-95 flex justify-between px-6">
-                        <span>\${isTheatre || isMice ? 'Получить доступ' : 'Оплатить карту'}</span>
+                        <span>Оплатить и открыть</span>
                         <i class="fas fa-chevron-right mt-1"></i>
                     </button>
-                    \${isMall ? '<div class="text-center text-xs text-gray-400 mt-2"><i class="fab fa-apple"></i> Pay & Google Pay доступны</div>' : ''}
                 </div>
             </div>
             \`;
         };
 
-        // 3. Экран успеха
         const SuccessView = (data) => \`
             <div class="flex flex-col h-full brand-gradient text-white p-8 items-center justify-center text-center relative">
-                <div class="absolute top-0 left-0 w-full h-full overflow-hidden opacity-20 pointer-events-none">
-                    <i class="fas fa-lock absolute -top-10 -left-10 text-9xl"></i>
-                    <i class="fas fa-check absolute bottom-10 right-10 text-9xl"></i>
-                </div>
-
                 <div class="w-24 h-24 bg-white/20 backdrop-blur rounded-full flex items-center justify-center text-white text-4xl mb-8 shadow-2xl border border-white/30">
                     <i class="fas fa-unlock-alt"></i>
                 </div>
-                
                 <h1 class="text-3xl font-bold mb-2">Ячейка открыта</h1>
-                <p class="text-indigo-100 mb-8 opacity-80">Не забудьте закрыть дверцу после использования</p>
-
+                <p class="text-indigo-100 mb-8 opacity-80">Не забудьте закрыть дверцу</p>
                 <div class="bg-white text-gray-900 rounded-2xl p-6 w-full shadow-2xl">
                     <div class="text-gray-400 text-xs uppercase font-bold mb-1">Номер ячейки</div>
                     <div class="text-6xl font-black text-indigo-600 mb-6">\${data.cellNumber}</div>
-                    
                     <div class="h-px bg-gray-100 w-full mb-6"></div>
-
-                    <div class="flex justify-between text-left">
-                        <div>
-                            <div class="text-gray-400 text-xs uppercase font-bold">Пин-код</div>
-                            <div class="text-2xl font-mono font-bold">\${data.accessCode}</div>
-                        </div>
-                        <div class="text-right">
-                             <div class="text-gray-400 text-xs uppercase font-bold">Действует до</div>
-                             <div class="text-sm font-medium">\${new Date(data.validUntil).toLocaleTimeString().slice(0,5)}</div>
-                        </div>
-                    </div>
+                    <div class="text-gray-400 text-xs uppercase font-bold">Пин-код</div>
+                    <div class="text-2xl font-mono font-bold">\${data.accessCode}</div>
                 </div>
-
-                <button onclick="navigate('home')" class="mt-auto w-full py-4 text-white/70 hover:text-white font-medium transition">
-                    На главную
-                </button>
+                <button onclick="navigate('home')" class="mt-auto w-full py-4 text-white/70 hover:text-white font-medium transition">На главную</button>
             </div>
         \`;
 
-        // 4. Admin Dashboard (Enterprise Style)
         const AdminView = () => \`
             <div class="flex h-full bg-gray-100 font-sans">
-                <!-- Sidebar -->
                 <div class="w-64 bg-gray-900 text-gray-400 hidden md:flex flex-col">
                     <div class="p-6 text-white font-bold text-xl tracking-wider border-b border-gray-800">LOCK&GO <span class="text-xs text-indigo-500 block">ENTERPRISE</span></div>
                     <nav class="flex-1 p-4 space-y-1">
-                        <a href="#" onclick="renderAdminTab('dash')" class="flex items-center gap-3 px-4 py-3 bg-indigo-600 text-white rounded-lg"><i class="fas fa-chart-pie"></i> Дашборд</a>
-                        <a href="#" onclick="renderAdminTab('cells')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-th-large"></i> Управление</a>
-                        <a href="#" onclick="renderAdminTab('logs')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-clipboard-list"></i> События</a>
-                        <a href="#" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-users"></i> Клиенты</a>
+                        <a href="#" onclick="renderAdminTab('dash')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-chart-pie"></i> Дашборд</a>
+                        <a href="#" onclick="renderAdminTab('cells')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-th-large"></i> Ячейки</a>
+                        <a href="#" onclick="renderAdminTab('tariffs')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition text-white bg-gray-800/50"><i class="fas fa-tag"></i> Тарифы</a>
+                        <a href="#" onclick="renderAdminTab('promos')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition text-white bg-gray-800/50"><i class="fas fa-gift"></i> Промокоды</a>
+                        <a href="#" onclick="renderAdminTab('logs')" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 rounded-lg transition"><i class="fas fa-list"></i> Логи</a>
                     </nav>
                     <div class="p-4 border-t border-gray-800">
                         <button onclick="navigate('home')" class="text-sm hover:text-white"><i class="fas fa-sign-out-alt"></i> Выход</button>
                     </div>
                 </div>
-
-                <!-- Main Content -->
                 <div class="flex-1 flex flex-col overflow-hidden">
-                    <!-- Header -->
                     <header class="bg-white shadow-sm py-4 px-6 flex justify-between items-center">
-                        <h2 class="font-bold text-gray-800 text-lg" id="admin-title">Обзор системы</h2>
+                        <h2 class="font-bold text-gray-800 text-lg" id="admin-title">Админ-панель</h2>
                         <div class="flex items-center gap-4">
-                            <span class="flex items-center gap-2 text-xs font-bold text-green-600 bg-green-50 px-3 py-1 rounded-full"><i class="fas fa-circle text-[8px]"></i> SYSTEM ONLINE</span>
+                            <span class="flex items-center gap-2 text-xs font-bold text-green-600 bg-green-50 px-3 py-1 rounded-full"><i class="fas fa-circle text-[8px]"></i> ONLINE</span>
                         </div>
                     </header>
-
-                    <!-- Content Area -->
-                    <div class="flex-1 overflow-y-auto p-6" id="admin-content">
-                        <!-- Loading -->
-                        <div class="flex justify-center mt-10"><i class="fas fa-circle-notch fa-spin text-indigo-600 text-2xl"></i></div>
-                    </div>
+                    <div class="flex-1 overflow-y-auto p-6" id="admin-content"></div>
                 </div>
             </div>
         \`;
@@ -315,216 +328,191 @@ app.get('*', (c) => {
 
         async function navigate(view, params = null) {
             state.view = view;
+            state.activePromo = null; // Reset promo
             const app = document.getElementById('app');
             
-            if (view === 'home') {
-                app.innerHTML = HomeView();
-                loadStations();
-            } else if (view === 'booking') {
-                app.innerHTML = BookingView(params); // params is station object
-                loadTariffs(params.id);
-            } else if (view === 'success') {
-                app.innerHTML = SuccessView(params);
-            } else if (view === 'admin_login') {
-                const pass = prompt("Введите пароль администратора:");
-                if (pass === '12345') navigate('admin');
-                else navigate('home');
-            } else if (view === 'admin') {
-                app.innerHTML = AdminView();
-                renderAdminTab('dash');
-            }
+            if (view === 'home') { app.innerHTML = HomeView(); loadStations(); }
+            else if (view === 'booking') { app.innerHTML = BookingView(params); loadTariffs(params.id); }
+            else if (view === 'success') { app.innerHTML = SuccessView(params); }
+            else if (view === 'admin_login') { if (prompt("Пароль:") === '12345') navigate('admin'); }
+            else if (view === 'admin') { app.innerHTML = AdminView(); renderAdminTab('dash'); }
         }
 
-        // Data Fetchers
         async function loadStations() {
-            try {
-                const res = await fetch('/api/locations');
-                const data = await res.json();
-                const list = document.getElementById('stations-list');
-                
-                if(data.length === 0) {
-                     list.innerHTML = '<div class="p-4 text-center text-gray-400">Нет доступных локаций</div>';
-                     return;
-                }
-
-                list.innerHTML = data.map(s => {
-                    let icon = 'fa-shopping-bag';
-                    if(s.type === 'theatre') icon = 'fa-theater-masks';
-                    if(s.type === 'mice') icon = 'fa-id-badge';
-
-                    return \`
-                    <div onclick='navigate("booking", \${JSON.stringify(s)})' class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex gap-4 cursor-pointer active:scale-[0.98] transition">
-                        <div class="w-16 h-16 bg-indigo-50 rounded-lg flex items-center justify-center text-indigo-600 text-2xl">
-                            <i class="fas \${icon}"></i>
-                        </div>
-                        <div class="flex-1">
-                            <div class="flex justify-between items-start">
-                                <h3 class="font-bold text-gray-900">\${s.name}</h3>
-                                <span class="text-[10px] font-bold bg-gray-100 text-gray-500 px-2 py-1 rounded uppercase">\${s.type}</span>
-                            </div>
-                            <p class="text-xs text-gray-500 mt-1 line-clamp-1">\${s.address}</p>
-                            <div class="mt-2 flex items-center gap-2 text-xs text-green-600 font-medium">
-                                <i class="fas fa-check-circle"></i> Свободно
-                            </div>
-                        </div>
+            const res = await fetch('/api/locations');
+            const data = await res.json();
+            document.getElementById('stations-list').innerHTML = data.map(s => \`
+                <div onclick='navigate("booking", \${JSON.stringify(s)})' class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex gap-4 cursor-pointer active:scale-[0.98] transition">
+                    <div class="w-16 h-16 bg-indigo-50 rounded-lg flex items-center justify-center text-indigo-600 text-2xl"><i class="fas fa-box"></i></div>
+                    <div class="flex-1">
+                        <h3 class="font-bold text-gray-900">\${s.name}</h3>
+                        <p class="text-xs text-gray-500">\${s.address}</p>
+                        <div class="mt-2 text-xs text-green-600 font-bold">Свободно</div>
                     </div>
-                    \`;
-                }).join('');
-            } catch(e) { console.error(e); }
+                </div>
+            \`).join('');
         }
 
         async function loadTariffs(stationId) {
-            try {
-                const res = await fetch('/api/location/' + stationId);
-                const { tariffs, available } = await res.json();
-                const container = document.getElementById('tariffs-list');
-                
-                container.innerHTML = tariffs.map(t => {
-                    const count = available[t.size] || 0;
-                    const isFree = t.price_initial === 0;
-                    return \`
-                    <label class="block relative group">
-                        <input type="radio" name="tariff" value="\${t.size}" class="peer sr-only" \${count === 0 ? 'disabled' : ''} onchange="updateTotal('\${isFree ? 'Бесплатно' : t.price_initial + ' ₽'}')">
-                        <div class="p-4 rounded-xl border-2 border-gray-100 peer-checked:border-indigo-600 peer-checked:bg-indigo-50 transition flex justify-between items-center \${count === 0 ? 'opacity-50' : ''}">
-                            <div class="flex items-center gap-3">
-                                <div class="w-10 h-10 rounded bg-white border border-gray-200 flex items-center justify-center font-bold text-gray-700">\${t.size}</div>
-                                <div>
-                                    <div class="text-sm font-bold text-gray-900">\${t.description}</div>
-                                    <div class="text-xs \${count > 0 ? 'text-green-600' : 'text-red-500'}">\${count > 0 ? \`Доступно: \${count}\` : 'Занято'}</div>
-                                </div>
-                            </div>
-                            <div class="font-bold \${isFree ? 'text-green-600' : 'text-gray-900'}">
-                                \${isFree ? 'Бесплатно' : t.price_initial + ' ₽'}
-                            </div>
+            const res = await fetch('/api/location/' + stationId);
+            const { tariffs, available } = await res.json();
+            state.currentTariffs = tariffs; // store for calc
+            document.getElementById('tariffs-list').innerHTML = tariffs.map(t => \`
+                <label class="block relative group">
+                    <input type="radio" name="tariff" value="\${t.size}" class="peer sr-only" onchange="updateTotal()">
+                    <div class="p-4 rounded-xl border-2 border-gray-100 peer-checked:border-indigo-600 peer-checked:bg-indigo-50 transition flex justify-between items-center">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded bg-white border border-gray-200 flex items-center justify-center font-bold text-gray-700">\${t.size}</div>
+                            <div class="text-sm font-bold text-gray-900">\${t.description}</div>
                         </div>
-                    </label>
-                    \`;
-                }).join('');
-            } catch(e) {}
+                        <div class="font-bold">\${t.price_initial} ₽</div>
+                    </div>
+                </label>
+            \`).join('');
         }
 
-        function updateTotal(price) {
-            document.getElementById('total-price').innerText = price;
+        async function checkPromo() {
+            const code = document.getElementById('promoInput').value.toUpperCase();
+            const status = document.getElementById('promoStatus');
+            if(!code) return;
+
+            const res = await fetch('/api/check-promo', { method: 'POST', body: JSON.stringify({code}) });
+            const data = await res.json();
+
+            status.classList.remove('hidden', 'text-green-600', 'text-red-600');
+            if(data.valid) {
+                state.activePromo = data;
+                status.innerText = \`✅ Промокод применен! Скидка \${data.discount}%\`;
+                status.classList.add('text-green-600');
+                updateTotal();
+            } else {
+                state.activePromo = null;
+                status.innerText = '❌ Неверный код';
+                status.classList.add('text-red-600');
+                updateTotal();
+            }
+        }
+
+        function updateTotal() {
+            const sizeInput = document.querySelector('input[name="tariff"]:checked');
+            if(!sizeInput) return;
+            const tariff = state.currentTariffs.find(t => t.size === sizeInput.value);
+            let price = tariff.price_initial;
+
+            if(state.activePromo) {
+                price = Math.round(price * (1 - state.activePromo.discount / 100));
+                document.getElementById('discount-label').innerText = \`Скидка -\${state.activePromo.discount}%\`;
+                document.getElementById('discount-label').classList.remove('hidden');
+            } else {
+                document.getElementById('discount-label').classList.add('hidden');
+            }
+
+            document.getElementById('total-price').innerText = price + ' ₽';
         }
 
         async function processBooking(stationId) {
             const sizeInput = document.querySelector('input[name="tariff"]:checked');
-            if(!sizeInput) return alert('Выберите размер ячейки');
-
-            // Симуляция задержки оплаты
-            const btn = document.querySelector('button[onclick^="processBooking"]');
-            const originalText = btn.innerHTML;
-            btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Обработка...';
-            btn.disabled = true;
-
-            try {
-                const res = await fetch('/api/book', {
-                    method: 'POST',
-                    body: JSON.stringify({ stationId, size: sizeInput.value })
-                });
-                const result = await res.json();
-                
-                setTimeout(() => {
-                    if(result.success) navigate('success', result);
-                    else {
-                        alert(result.error);
-                        btn.innerHTML = originalText;
-                        btn.disabled = false;
-                    }
-                }, 1500); // Имитация процессинга
-            } catch(e) {
-                alert('Network Error');
-                btn.innerHTML = originalText;
-                btn.disabled = false;
-            }
+            if(!sizeInput) return alert('Выберите размер');
+            
+            const res = await fetch('/api/book', {
+                method: 'POST',
+                body: JSON.stringify({ 
+                    stationId, 
+                    size: sizeInput.value,
+                    promoCode: state.activePromo ? state.activePromo.code : null
+                })
+            });
+            const result = await res.json();
+            if(result.success) navigate('success', result);
+            else alert(result.error);
         }
 
         // Admin Logic
         async function renderAdminTab(tab) {
             const content = document.getElementById('admin-content');
-            
             if (tab === 'dash') {
-                const res = await fetch('/api/admin/dashboard');
-                const stats = await res.json();
-                content.innerHTML = \`
-                    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-                        <div class="bg-white p-6 rounded-xl shadow-sm border-l-4 border-indigo-600">
-                            <div class="text-gray-400 text-xs font-bold uppercase">Выручка (День)</div>
-                            <div class="text-2xl font-black text-gray-900">\${stats.revenue.toLocaleString()} ₽</div>
-                        </div>
-                        <div class="bg-white p-6 rounded-xl shadow-sm border-l-4 border-blue-500">
-                            <div class="text-gray-400 text-xs font-bold uppercase">Активные аренды</div>
-                            <div class="text-2xl font-black text-gray-900">\${stats.cells_occupied}</div>
-                        </div>
-                         <div class="bg-white p-6 rounded-xl shadow-sm border-l-4 border-green-500">
-                            <div class="text-gray-400 text-xs font-bold uppercase">Станции в сети</div>
-                            <div class="text-2xl font-black text-gray-900">\${stats.stations_online}</div>
-                        </div>
-                        <div class="bg-white p-6 rounded-xl shadow-sm border-l-4 border-red-500">
-                            <div class="text-gray-400 text-xs font-bold uppercase">Инциденты</div>
-                            <div class="text-2xl font-black text-gray-900">\${stats.incidents}</div>
-                        </div>
-                    </div>
-                    <div class="bg-white p-6 rounded-xl shadow-sm">
-                        <h3 class="font-bold mb-4">График загрузки сети</h3>
-                        <div class="h-64 bg-gray-50 rounded flex items-center justify-center text-gray-400">[Chart.js Placeholder]</div>
-                    </div>
-                \`;
+                content.innerHTML = '<h2 class="text-xl font-bold mb-4">Дашборд</h2><div class="bg-white p-6 rounded shadow">Статистика загружается...</div>';
             } else if (tab === 'cells') {
                 const res = await fetch('/api/admin/cells_live');
                 const cells = await res.json();
                 content.innerHTML = \`
-                    <div class="bg-white rounded-xl shadow-sm overflow-hidden">
-                        <table class="w-full text-left text-sm">
-                            <thead class="bg-gray-50 text-gray-500 font-bold border-b">
-                                <tr><th class="p-4">Станция</th><th class="p-4">Ячейка</th><th class="p-4">Статус</th><th class="p-4">Управление</th></tr>
-                            </thead>
-                            <tbody class="divide-y">
-                                \${cells.map(c => \`
-                                <tr>
-                                    <td class="p-4">\${c.station_name}</td>
-                                    <td class="p-4 font-mono font-bold">\${c.cell_number} (\${c.size})</td>
-                                    <td class="p-4"><span class="px-2 py-1 rounded-full text-xs font-bold \${c.status==='free'?'bg-green-100 text-green-700':'bg-red-100 text-red-700'}">\${c.status}</span></td>
-                                    <td class="p-4">
-                                        <button onclick="adminCmd(\${c.id}, 'open')" class="text-indigo-600 font-bold hover:underline">Открыть</button>
+                    <div class="bg-white rounded shadow overflow-hidden"><table class="w-full text-sm text-left">
+                    <thead class="bg-gray-50 font-bold text-gray-500"><tr><th class="p-3">Станция</th><th class="p-3">Ячейка</th><th class="p-3">Статус</th><th class="p-3">Действие</th></tr></thead>
+                    <tbody>\${cells.map(c => \`<tr><td class="p-3">\${c.station_name}</td><td class="p-3">\${c.cell_number}</td><td class="p-3">\${c.status}</td><td class="p-3"><button onclick="adminCmd(\${c.id},'open')" class="text-blue-600 font-bold">Открыть</button></td></tr>\`).join('')}</tbody>
+                    </table></div>\`;
+            } else if (tab === 'tariffs') {
+                const res = await fetch('/api/admin/tariffs');
+                const tariffs = await res.json();
+                content.innerHTML = \`
+                    <h2 class="text-xl font-bold mb-4">Управление тарифами</h2>
+                    <div class="bg-white rounded shadow overflow-hidden">
+                        <table class="w-full text-sm text-left">
+                            <thead class="bg-gray-50 font-bold text-gray-500"><tr><th class="p-3">Станция</th><th class="p-3">Размер</th><th class="p-3">Цена (Руб/час)</th><th class="p-3">Описание</th></tr></thead>
+                            <tbody>\${tariffs.map(t => \`
+                                <tr class="border-t">
+                                    <td class="p-3">\${t.station_name}</td>
+                                    <td class="p-3"><span class="bg-gray-100 px-2 py-1 rounded">\${t.size}</span></td>
+                                    <td class="p-3">
+                                        <input type="number" value="\${t.price_initial}" onchange="updateTariff(\${t.id}, this.value)" class="w-20 border rounded p-1 font-bold text-indigo-600">
                                     </td>
+                                    <td class="p-3 text-gray-500">\${t.description}</td>
                                 </tr>
-                                \`).join('')}
-                            </tbody>
+                            \`).join('')}</tbody>
+                        </table>
+                    </div>
+                    <p class="mt-4 text-xs text-gray-500">* Изменения цены сохраняются автоматически при вводе</p>
+                \`;
+            } else if (tab === 'promos') {
+                const res = await fetch('/api/admin/promos');
+                const promos = await res.json();
+                content.innerHTML = \`
+                    <div class="flex justify-between mb-4">
+                        <h2 class="text-xl font-bold">Промокоды</h2>
+                        <button onclick="createPromo()" class="bg-indigo-600 text-white px-4 py-2 rounded font-bold text-sm">+ Создать</button>
+                    </div>
+                    <div class="bg-white rounded shadow overflow-hidden">
+                        <table class="w-full text-sm text-left">
+                            <thead class="bg-gray-50 font-bold text-gray-500"><tr><th class="p-3">Код</th><th class="p-3">Скидка</th><th class="p-3">Использован</th><th class="p-3">Удалить</th></tr></thead>
+                            <tbody>\${promos.map(p => \`
+                                <tr class="border-t">
+                                    <td class="p-3 font-mono font-bold text-lg">\${p.code}</td>
+                                    <td class="p-3 text-green-600 font-bold">-\${p.discount_percent}%</td>
+                                    <td class="p-3">\${p.usage_count} раз</td>
+                                    <td class="p-3"><button onclick="deletePromo(\${p.id})" class="text-red-500 hover:underline">Удалить</button></td>
+                                </tr>
+                            \`).join('')}</tbody>
                         </table>
                     </div>
                 \`;
             } else if (tab === 'logs') {
-                const res = await fetch('/api/admin/logs');
-                const logs = await res.json();
-                 content.innerHTML = \`
-                    <div class="bg-white rounded-xl shadow-sm overflow-hidden">
-                        <table class="w-full text-left text-sm">
-                            <thead class="bg-gray-50 text-gray-500 font-bold border-b">
-                                <tr><th class="p-4">Время</th><th class="p-4">Действие</th><th class="p-4">Детали</th></tr>
-                            </thead>
-                            <tbody class="divide-y">
-                                \${logs.map(l => \`
-                                <tr>
-                                    <td class="p-4 text-gray-500">\${new Date(l.created_at).toLocaleString()}</td>
-                                    <td class="p-4 font-bold">\${l.action}</td>
-                                    <td class="p-4 text-gray-700">\${l.details}</td>
-                                </tr>
-                                \`).join('')}
-                            </tbody>
-                        </table>
-                    </div>
-                \`;
+                 const res = await fetch('/api/admin/logs'); const logs = await res.json();
+                 content.innerHTML = \`<div class="bg-white rounded shadow"><table class="w-full text-sm text-left"><thead class="bg-gray-50 font-bold"><tr><th class="p-3">Время</th><th class="p-3">Инфо</th></tr></thead><tbody>\${logs.map(l=>\`<tr><td class="p-3">\${new Date(l.created_at).toLocaleTimeString()}</td><td class="p-3">\${l.details}</td></tr>\`).join('')}</tbody></table></div>\`;
             }
         }
 
         async function adminCmd(cellId, cmd) {
-            if(!confirm('Выполнить действие?')) return;
-            await fetch('/api/admin/command', {
-                method: 'POST',
-                body: JSON.stringify({ cellId, cmd })
-            });
-            renderAdminTab('cells');
+            if(confirm('Открыть?')) { await fetch('/api/admin/command', {method:'POST', body:JSON.stringify({cellId, cmd})}); renderAdminTab('cells'); }
+        }
+
+        async function updateTariff(id, price) {
+            await fetch('/api/admin/tariff/update', { method: 'POST', body: JSON.stringify({ id, price: parseInt(price) }) });
+        }
+
+        async function createPromo() {
+            const code = prompt("Введите код (например SALE20):");
+            const discount = prompt("Процент скидки (например 20):");
+            if(code && discount) {
+                const res = await fetch('/api/admin/promo/create', { method: 'POST', body: JSON.stringify({ code: code.toUpperCase(), discount: parseInt(discount) }) });
+                const d = await res.json();
+                if(d.success) renderAdminTab('promos'); else alert(d.error);
+            }
+        }
+
+        async function deletePromo(id) {
+            if(confirm('Удалить промокод?')) {
+                await fetch('/api/admin/promo/delete', { method: 'POST', body: JSON.stringify({ id }) });
+                renderAdminTab('promos');
+            }
         }
 
         // Init
